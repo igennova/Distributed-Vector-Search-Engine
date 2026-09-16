@@ -29,4 +29,10 @@ def brute_force_search(vectors, query, k=10):
       Start with a readable for-loop (compute similarity to every vector, pick top k).
       Once the tests pass, try a vectorized version and compare the speed in benchmark.py.
     """
+    scores = []
+    for i, v in enumerate(vectors):
+        sim = np.dot(query, v) / (np.linalg.norm(query) * np.linalg.norm(v))
+        scores.append((i, sim))
+    scores.sort(key=lambda x: x[1], reverse=True)
+    return [x[0] for x in scores[:k]]
     raise NotImplementedError("Phase 0: implement brute_force_search (see the hint above).")
