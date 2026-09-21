@@ -1,41 +1,74 @@
 # Distributed Vector Search Engine
 
-A small, educational distributed ANN (approximate nearest neighbor) search engine, built
-from scratch to understand indexing, sharding, routing, replication, and distributed query
-execution. **Not** a Qdrant/Milvus clone — the goal is understanding, not feature parity.
+A distributed approximate-nearest-neighbor (ANN) search engine built from scratch in Python —
+covering indexing, sharding, query routing, replication, and distributed query execution. The
+focus is on understanding the internals of systems like Qdrant, Milvus, and Pinecone rather than
+feature parity.
 
-## The learning contract
-- **I implement the search algorithms** (`search.py`) — that's where the learning is.
-- The dataset oracle, benchmark, and tests are provided so my progress is always measurable.
-- Rule: I don't move to the next phase until the current one is benchmarked and I can explain *why* it works.
+## Overview
+
+Vector search powers semantic search, retrieval-augmented generation, and recommendation systems:
+data is embedded into high-dimensional vectors, and a query returns the vectors closest to it by
+cosine similarity. Doing this exactly is linear in the dataset size; doing it fast at scale
+requires an ANN index and, beyond one machine, sharding and a coordinator that fans queries out
+and merges the results.
+
+```
+          Client
+            │
+     Query Coordinator
+            │  (fan-out)
+   ┌────────┼────────┐
+   ▼        ▼        ▼
+ Shard 1  Shard 2  Shard 3
+ (ANN)    (ANN)    (ANN)
+   └────────┼────────┘
+            ▼
+       Top-K Merge
+            │
+         Results
+```
 
 ## Setup
+
 ```bash
-cd vector-search-engine
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Phase 0 — exact baseline (START HERE)
-1. Implement `brute_force_search` in `search.py`.
-2. `python test_search.py`   → must print "All tests passed".
-3. `python benchmark.py`     → brute force is the oracle, so **recall@10 must be 1.000**.
-   Note the latency/QPS — this is the bar every index has to beat on speed while keeping recall high.
+## Usage
+
+```bash
+python test_search.py     # correctness tests
+python benchmark.py       # recall@k, latency (p50/p99), and QPS vs. an exact oracle
+```
+
+## Benchmarks
+
+Measured on a synthetic dataset (10,000 vectors, dim 128, k=10):
+
+| Index        | recall@10 | p50 latency | QPS |
+|--------------|-----------|-------------|-----|
+| Brute force  | 1.000     | ~12 ms      | ~80 |
+
+Exact brute-force search scales linearly with dataset size, which is the motivation for the ANN
+index. Results across larger datasets are added as each stage lands.
 
 ## Roadmap
-- [x] Phase 0 — brute-force cosine baseline + benchmark harness
-- [ ] Phase 1 — HNSW index (graph-based ANN), single node. Goal: recall ≥ 0.95 at a fraction of brute-force latency.
-- [ ] Phase 2 — persistence (serialize/load the index, mmap)
-- [ ] Phase 3 — gRPC API around a single shard
-- [ ] Phase 4 — sharding: N shard processes + a coordinator (scatter-gather)
-- [ ] Phase 5 — parallel fan-out + top-K merge across shards
-- [ ] Phase 6 — replication
-- [ ] Phase 7 — node-failure handling
-- [ ] Phase 8 — WAL / snapshots for durability
-- [ ] Phase 9 — benchmark recall/latency/QPS across growing dataset sizes
-- [ ] Phase 10 — Docker / Kubernetes deployment
 
-## DECISIONS.md
-For each phase, write down: the tradeoff faced, what I chose, and why. That file doubles as
-the resume/interview evidence — and it keeps the reasoning mine, not the AI's.
-```
+- [x] Exact brute-force cosine baseline + benchmark harness
+- [ ] HNSW index (graph-based ANN), single node
+- [ ] Index persistence (serialization, mmap)
+- [ ] gRPC service around a single shard
+- [ ] Sharding: N shard processes + a query coordinator (scatter-gather)
+- [ ] Parallel fan-out + top-K merge across shards
+- [ ] Replication
+- [ ] Node-failure handling
+- [ ] Write-ahead log / snapshots for durability
+- [ ] Benchmarks across growing dataset sizes
+- [ ] Docker / Kubernetes deployment
+
+## Design notes
+
+Key design decisions and trade-offs for each stage are documented in
+[`DECISIONS.md`](DECISIONS.md).
