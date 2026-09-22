@@ -47,17 +47,22 @@ python benchmark.py       # recall@k, latency (p50/p99), and QPS vs. an exact or
 
 Measured on a synthetic dataset (10,000 vectors, dim 128, k=10):
 
-| Index        | recall@10 | p50 latency | QPS |
-|--------------|-----------|-------------|-----|
-| Brute force  | 1.000     | ~12 ms      | ~80 |
+| Method               | recall@10 | p50 latency | QPS  |
+|----------------------|-----------|-------------|------|
+| Brute force (exact)  | 1.000     | ~12.9 ms    | ~77  |
+| HNSW, ef_search=50   | 0.564     | ~1.8 ms     | ~541 |
+| HNSW, ef_search=200  | 0.930     | ~5.2 ms     | ~192 |
+| HNSW, ef_search=400  | 0.987     | ~8.3 ms     | ~120 |
 
-Exact brute-force search scales linearly with dataset size, which is the motivation for the ANN
-index. Results across larger datasets are added as each stage lands.
+`ef_search` trades recall for latency at query time with no rebuild. Exact search scales linearly
+with dataset size, which is the motivation for the ANN index. (The dataset is random Gaussian, a
+worst case for ANN; real clustered embeddings reach high recall at lower `ef`.) Run it with
+`python benchmark_hnsw.py`.
 
 ## Roadmap
 
 - [x] Exact brute-force cosine baseline + benchmark harness
-- [ ] HNSW index (graph-based ANN), single node
+- [x] HNSW index (graph-based ANN), single node
 - [ ] Index persistence (serialization, mmap)
 - [ ] gRPC service around a single shard
 - [ ] Sharding: N shard processes + a query coordinator (scatter-gather)

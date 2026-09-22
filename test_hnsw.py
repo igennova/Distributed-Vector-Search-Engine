@@ -51,8 +51,29 @@ def test_search_layer_ef1_matches_greedy():
     assert h._search_layer(query, entry=0, layer=0, ef=1) == [greedy]
 
 
+def test_built_index_has_high_recall():
+    # Build a real multi-layer index and check search recall against exact top-k.
+    rng = np.random.default_rng(0)
+    data = rng.standard_normal((300, 32)).astype(np.float32)
+    queries = rng.standard_normal((50, 32)).astype(np.float32)
+
+    index = HNSW(M=8, ef_construction=64, ef_search=32, seed=1).build(data)
+
+    def exact_top_k(q, k):
+        return set(int(i) for i in np.argsort([index._distance(q, v) for v in data])[:k])
+
+    hits = total = 0
+    for q in queries:
+        got = set(index.search(q, k=10))
+        hits += len(got & exact_top_k(q, 10))
+        total += 10
+    recall = hits / total
+    assert recall > 0.85, f"recall too low: {recall:.3f}"
+
+
 if __name__ == "__main__":
     test_greedy_descend_reaches_true_nearest()
     test_search_layer_returns_true_top_k()
     test_search_layer_ef1_matches_greedy()
+    test_built_index_has_high_recall()
     print("All HNSW tests passed ✅")
