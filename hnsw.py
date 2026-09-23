@@ -154,12 +154,18 @@ class HNSW:
             self.insert(v)
         return self
 
-    def search(self, query, k=10):
-        """Return the ids of the approximate k nearest neighbors of query."""
+    def search_with_distances(self, query, k=10):
+        """Return the approximate k nearest neighbors as (distance, id) pairs, closest first."""
+        if self.entry_point is None:                      # empty index
+            return []
         query = np.asarray(query, dtype=np.float32)
         entry = self.entry_point
         for layer in range(self.top_layer, 0, -1):        # descend the sparse upper layers
             entry = self._greedy_descend(query, entry, layer)
         candidates = self._search_layer(query, entry, 0, self.ef_search)
-        ordered = sorted(candidates, key=lambda n: self._distance(query, self.vectors[n]))
-        return ordered[:k]
+        scored = sorted((self._distance(query, self.vectors[n]), n) for n in candidates)
+        return scored[:k]
+
+    def search(self, query, k=10):
+        """Return the ids of the approximate k nearest neighbors of query."""
+        return [node_id for _, node_id in self.search_with_distances(query, k)]

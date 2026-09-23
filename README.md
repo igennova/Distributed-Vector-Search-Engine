@@ -59,14 +59,26 @@ with dataset size, which is the motivation for the ANN index. (The dataset is ra
 worst case for ANN; real clustered embeddings reach high recall at lower `ef`.) Run it with
 `python benchmark_hnsw.py`.
 
+Sharded search (same data, ef_search=50, shards queried sequentially):
+
+| Shards | recall@10 | p50 latency | build time |
+|--------|-----------|-------------|------------|
+| 1      | 0.554     | ~1.8 ms     | ~29 s      |
+| 2      | 0.701     | ~3.7 ms     | ~26 s      |
+| 4      | 0.876     | ~5.5 ms     | ~20 s      |
+
+More shards raise recall and cut build time, but add total query work; latency only drops once
+shards are queried in parallel. Run it with `python benchmark_cluster.py`.
+
 ## Roadmap
 
 - [x] Exact brute-force cosine baseline + benchmark harness
 - [x] HNSW index (graph-based ANN), single node
+- [x] Sharded search: coordinator with scatter-gather and top-K merge (in-process)
+- [ ] Parallel fan-out across shards
 - [ ] Index persistence (serialization, mmap)
 - [ ] gRPC service around a single shard
-- [ ] Sharding: N shard processes + a query coordinator (scatter-gather)
-- [ ] Parallel fan-out + top-K merge across shards
+- [ ] Shards as separate processes behind the coordinator
 - [ ] Replication
 - [ ] Node-failure handling
 - [ ] Write-ahead log / snapshots for durability
