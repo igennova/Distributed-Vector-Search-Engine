@@ -1,11 +1,9 @@
 """
-Dataset + ground-truth oracle.  (PROVIDED — you don't need to edit this.)
+Synthetic data and the exact ground truth used to score every index.
 
-- make_dataset(): synthetic vectors + queries to search over.
-- exact_neighbors(): the TRUE nearest neighbors by exact cosine, computed with a
-  fully-vectorized numpy pass. This is the "answer key" your recall is measured against.
-  Note it's deliberately separate from search.py's brute_force_search: this one is the
-  trusted oracle, yours is the implementation you're learning to write.
+- make_dataset(): random vectors plus queries to search with.
+- exact_neighbors(): the true top-k neighbors by cosine similarity, computed in one
+  vectorized numpy pass. Recall is measured against this.
 """
 import numpy as np
 

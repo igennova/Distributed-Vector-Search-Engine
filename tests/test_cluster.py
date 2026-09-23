@@ -1,10 +1,7 @@
-"""
-Tests for sharded search (coordinator + shards).
-Run:  python test_cluster.py
-"""
+"""Tests for sharded search (coordinator + shards)."""
 import numpy as np
-from cluster import Coordinator
-from dataset import exact_neighbors
+from vsearch.cluster import Coordinator
+from vsearch.dataset import exact_neighbors
 
 
 def test_every_vector_lands_in_exactly_one_shard():
@@ -45,10 +42,3 @@ def test_sharded_recall_is_high():
     hits = sum(len(set(coord.search(q, 10)) & set(t.tolist())) for q, t in zip(queries, truth))
     recall = hits / (10 * len(queries))
     assert recall > 0.85, f"recall too low: {recall:.3f}"
-
-
-if __name__ == "__main__":
-    test_every_vector_lands_in_exactly_one_shard()
-    test_top_k_all_in_one_shard_is_still_found()
-    test_sharded_recall_is_high()
-    print("All cluster tests passed ✅")

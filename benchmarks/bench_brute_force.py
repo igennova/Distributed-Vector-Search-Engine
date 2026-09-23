@@ -1,17 +1,13 @@
 """
-Benchmark harness.  (PROVIDED — your ruler for every phase.)
+Benchmark exact brute-force search: recall@k (vs. the exact ground truth), p50/p99
+latency, and QPS.
 
-Runs any search function over the query set and reports:
-  - recall@k  (vs the exact oracle)   -> quality
-  - p50 / p99 latency in ms           -> speed
-  - QPS                               -> throughput
-
-Usage:
-    python benchmark.py
+Run:  python -m benchmarks.bench_brute_force
 """
 import time
 import numpy as np
-from dataset import make_dataset, exact_neighbors
+from vsearch.dataset import make_dataset, exact_neighbors
+from vsearch.brute_force import brute_force_search
 
 
 def recall_at_k(predicted, truth):
@@ -44,9 +40,6 @@ def benchmark(search_fn, vectors, queries, k=10, ground_truth=None, label=""):
 
 
 if __name__ == "__main__":
-    from search import brute_force_search
-
     vectors, queries = make_dataset()
-    # Brute force IS the oracle, so its recall must be 1.000. If it isn't, your
-    # implementation is wrong — fix it before moving to Phase 1.
+    # Brute force is exact, so recall here should always be 1.000.
     benchmark(brute_force_search, vectors, queries, k=10, label="brute force")

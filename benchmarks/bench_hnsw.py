@@ -2,13 +2,13 @@
 Compare HNSW against the exact brute-force baseline, and show the recall/latency
 tradeoff as ef_search varies.
 
-Run:  python benchmark_hnsw.py
+Run:  python -m benchmarks.bench_hnsw
 """
 import time
 import numpy as np
-from dataset import make_dataset, exact_neighbors
-from search import brute_force_search
-from hnsw import HNSW
+from vsearch.dataset import make_dataset, exact_neighbors
+from vsearch.brute_force import brute_force_search
+from vsearch.hnsw import HNSW
 
 
 def recall_at_k(predicted, truth):

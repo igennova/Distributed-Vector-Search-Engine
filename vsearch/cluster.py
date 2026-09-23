@@ -3,7 +3,7 @@ Sharded search: vectors are spread across several HNSW shards, and a coordinator
 fans each query out to every shard and merges their results (scatter-gather).
 """
 import heapq
-from hnsw import HNSW
+from .hnsw import HNSW
 
 
 class Shard:

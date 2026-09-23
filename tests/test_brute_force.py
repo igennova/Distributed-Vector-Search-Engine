@@ -1,14 +1,10 @@
-"""
-Tiny hand-checkable tests for Phase 0.  (PROVIDED.)
-Run:  python test_search.py
-Make these pass before touching the benchmark.
-"""
+"""Tests for exact brute-force search on small, hand-checkable inputs."""
 import numpy as np
-from search import brute_force_search
+from vsearch.brute_force import brute_force_search
 
 
 def test_nearest_is_identical_vector():
-    # query equals vector index 1 exactly -> nearest neighbor must be index 1
+    # query equals vector 1 exactly -> nearest neighbor must be index 1
     vectors = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32)
     query = np.array([0, 1, 0], dtype=np.float32)
     out = list(np.asarray(brute_force_search(vectors, query, k=1)))
@@ -21,9 +17,3 @@ def test_returns_k_in_similarity_order():
     query = np.array([1, 0], dtype=np.float32)
     out = list(np.asarray(brute_force_search(vectors, query, k=2)))
     assert out == [0, 1], f"expected [0, 1], got {out}"
-
-
-if __name__ == "__main__":
-    test_nearest_is_identical_vector()
-    test_returns_k_in_similarity_order()
-    print("All tests passed ✅  — now run: python benchmark.py")

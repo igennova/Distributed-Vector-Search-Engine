@@ -1,12 +1,12 @@
 """
 Sharded vs single-index search on the same data: recall, per-query latency, build time.
 
-Run:  python benchmark_cluster.py
+Run:  python -m benchmarks.bench_cluster
 """
 import time
 import numpy as np
-from dataset import make_dataset, exact_neighbors
-from cluster import Coordinator
+from vsearch.dataset import make_dataset, exact_neighbors
+from vsearch.cluster import Coordinator
 
 vectors, queries = make_dataset()          # 10k vectors, dim 128, 100 queries
 k = 10

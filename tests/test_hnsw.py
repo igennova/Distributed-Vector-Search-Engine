@@ -1,9 +1,6 @@
-"""
-Tests for the HNSW graph-search primitives on a small hand-built graph.
-Run:  python test_hnsw.py
-"""
+"""Tests for HNSW: the graph-search primitives on a hand-built graph, and a built index's recall."""
 import numpy as np
-from hnsw import HNSW
+from vsearch.hnsw import HNSW
 
 # Six points fanned out by angle in 2D, connected as a chain (each node linked to its
 # immediate neighbors). A chain has no local minima, so a greedy walk from any start
@@ -69,11 +66,3 @@ def test_built_index_has_high_recall():
         total += 10
     recall = hits / total
     assert recall > 0.85, f"recall too low: {recall:.3f}"
-
-
-if __name__ == "__main__":
-    test_greedy_descend_reaches_true_nearest()
-    test_search_layer_returns_true_top_k()
-    test_search_layer_ef1_matches_greedy()
-    test_built_index_has_high_recall()
-    print("All HNSW tests passed ✅")
