@@ -36,11 +36,26 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## Project layout
+
+```
+vsearch/            the engine
+  dataset.py          synthetic data + exact ground truth
+  brute_force.py      exact search (baseline)
+  hnsw.py             HNSW index
+  cluster.py          shards + scatter-gather coordinator
+tests/              pytest suite
+benchmarks/         recall / latency / QPS benchmarks
+DECISIONS.md        design decisions and trade-offs
+```
+
 ## Usage
 
 ```bash
-python test_search.py     # correctness tests
-python benchmark.py       # recall@k, latency (p50/p99), and QPS vs. an exact oracle
+pytest                                   # run all tests
+python -m benchmarks.bench_brute_force   # exact baseline: recall, p50/p99, QPS
+python -m benchmarks.bench_hnsw          # HNSW vs brute force across ef_search
+python -m benchmarks.bench_cluster       # 1 vs 2 vs 4 shards
 ```
 
 ## Benchmarks
@@ -57,7 +72,7 @@ Measured on a synthetic dataset (10,000 vectors, dim 128, k=10):
 `ef_search` trades recall for latency at query time with no rebuild. Exact search scales linearly
 with dataset size, which is the motivation for the ANN index. (The dataset is random Gaussian, a
 worst case for ANN; real clustered embeddings reach high recall at lower `ef`.) Run it with
-`python benchmark_hnsw.py`.
+`python -m benchmarks.bench_hnsw`.
 
 Sharded search (same data, ef_search=50, shards queried sequentially):
 
@@ -68,7 +83,7 @@ Sharded search (same data, ef_search=50, shards queried sequentially):
 | 4      | 0.876     | ~5.5 ms     | ~20 s      |
 
 More shards raise recall and cut build time, but add total query work; latency only drops once
-shards are queried in parallel. Run it with `python benchmark_cluster.py`.
+shards are queried in parallel. Run it with `python -m benchmarks.bench_cluster`.
 
 ## Roadmap
 
