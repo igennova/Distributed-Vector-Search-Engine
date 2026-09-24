@@ -35,3 +35,23 @@
 - For comparison, one index at ef_search=200 gives 0.93 / 5.2ms, so sequential in-process
   sharding is not a free win. Its payoff is parallelism and holding more data than one
   machine can.
+
+## Parallel fan-out
+- Three coordinator modes: sequential, threads (a thread pool), and processes (one
+  long-lived worker process per shard). Each worker builds and owns its shard's index, so
+  per query only the query vector (~0.5 KB) and k results cross the pipe instead of
+  megabytes of index data — move the computation to the data.
+- @ 10k vectors, 4 shards, ef_search=50: sequential 5.6ms, threads 30.5ms, processes 1.6ms
+  (3.5x). Build 18s → 4.9s with processes, since shards build their graphs in parallel.
+  Recall is identical in every mode (0.876); a test checks results match exactly.
+- Threads were 5x slower, not just no faster. Changing sys.setswitchinterval (5ms → 0.1ms)
+  had no effect, which ruled out forced GIL switching. Counting context switches did explain
+  it: ~1 per query sequential, 262 with one worker thread, 3.1k with two, 12.8k with four.
+  The search makes thousands of small numpy calls that release and reacquire the GIL; with
+  other threads waiting, every release becomes an OS-level handoff.
+- Tiny shards (200 vectors) still favored processes (0.23ms vs 0.62ms). I had expected the
+  overhead to dominate, but a local pipe round trip costs tens of microseconds, less than the
+  ~0.15ms of work per shard. Over a real network the overhead is larger, which should move
+  that crossover.
+- Takeaway: CPU-bound Python needs processes for parallelism. Threads suit I/O-bound work,
+  like a coordinator waiting on remote shards.

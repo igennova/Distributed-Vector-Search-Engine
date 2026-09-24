@@ -1,5 +1,6 @@
 """Tests for sharded search (coordinator + shards)."""
 import numpy as np
+import pytest
 from vsearch.cluster import Coordinator
 from vsearch.dataset import exact_neighbors
 
@@ -42,3 +43,23 @@ def test_sharded_recall_is_high():
     hits = sum(len(set(coord.search(q, 10)) & set(t.tolist())) for q, t in zip(queries, truth))
     recall = hits / (10 * len(queries))
     assert recall > 0.85, f"recall too low: {recall:.3f}"
+
+
+@pytest.mark.parametrize("mode", ["threads", "processes"])
+def test_parallel_modes_return_same_results_as_sequential(mode):
+    # Parallel fan-out must change only how fast results arrive, never what they are.
+    rng = np.random.default_rng(3)
+    data = rng.standard_normal((200, 16)).astype(np.float32)
+    queries = rng.standard_normal((10, 16)).astype(np.float32)
+    params = dict(M=8, ef_construction=32, ef_search=32, seed=0)
+
+    with Coordinator(4, **params) as sequential, Coordinator(4, mode=mode, **params) as parallel:
+        sequential.add(data)
+        parallel.add(data)
+        for q in queries:
+            assert parallel.search(q, 5) == sequential.search(q, 5)
+
+
+def test_unknown_mode_is_rejected():
+    with pytest.raises(ValueError):
+        Coordinator(2, mode="gpu")

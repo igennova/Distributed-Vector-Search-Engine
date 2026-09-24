@@ -30,7 +30,7 @@ vsearch/            the engine
   dataset.py          synthetic data + exact ground truth
   brute_force.py      exact search (baseline)
   hnsw.py             HNSW index
-  cluster.py          shards + scatter-gather coordinator
+  cluster.py          shards, per-shard worker processes, scatter-gather coordinator
 tests/              pytest suite
 benchmarks/         recall / latency / QPS benchmarks
 DECISIONS.md        design decisions and trade-offs
@@ -43,6 +43,7 @@ pytest                                   # run all tests
 python -m benchmarks.bench_brute_force   # exact baseline: recall, p50/p99, QPS
 python -m benchmarks.bench_hnsw          # HNSW vs brute force across ef_search
 python -m benchmarks.bench_cluster       # 1 vs 2 vs 4 shards
+python -m benchmarks.bench_parallel      # sequential vs threads vs processes fan-out
 ```
 
 ## Benchmarks
@@ -72,15 +73,27 @@ Sharded search (same data, ef_search=50, shards queried sequentially):
 More shards raise recall and cut build time, but add total query work; latency only drops once
 shards are queried in parallel. Run it with `python -m benchmarks.bench_cluster`.
 
+Parallel fan-out (4 shards, same data and parameters):
+
+| Fan-out                        | recall@10 | p50 latency | build time |
+|--------------------------------|-----------|-------------|------------|
+| Sequential                     | 0.876     | ~5.6 ms     | ~18 s      |
+| Threads                        | 0.876     | ~30.5 ms    | ~18 s      |
+| Processes (one worker/shard)   | 0.876     | ~1.6 ms     | ~4.9 s     |
+
+Each worker process owns its shard's index, so only the query and its k results cross process
+boundaries. Threads are *slower* than sequential: the search makes thousands of small numpy calls
+that release and reacquire the GIL, and with several threads waiting every release becomes a
+context switch (~12,800 per query with 4 threads). Run it with `python -m benchmarks.bench_parallel`.
+
 ## Roadmap
 
 - [x] Exact brute-force cosine baseline + benchmark harness
 - [x] HNSW index (graph-based ANN), single node
 - [x] Sharded search: coordinator with scatter-gather and top-K merge (in-process)
-- [ ] Parallel fan-out across shards
+- [x] Parallel fan-out: one long-lived worker process per shard
 - [ ] Index persistence (serialization, mmap)
-- [ ] gRPC service around a single shard
-- [ ] Shards as separate processes behind the coordinator
+- [ ] Shards as network services (gRPC) behind the coordinator
 - [ ] Replication
 - [ ] Node-failure handling
 - [ ] Write-ahead log / snapshots for durability
