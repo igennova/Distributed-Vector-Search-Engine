@@ -13,21 +13,8 @@ cosine similarity. Doing this exactly is linear in the dataset size; doing it fa
 requires an ANN index and, beyond one machine, sharding and a coordinator that fans queries out
 and merges the results.
 
-```
-          Client
-            │
-     Query Coordinator
-            │  (fan-out)
-   ┌────────┼────────┐
-   ▼        ▼        ▼
- Shard 1  Shard 2  Shard 3
- (ANN)    (ANN)    (ANN)
-   └────────┼────────┘
-            ▼
-       Top-K Merge
-            │
-         Results
-```
+<img width="665" height="500" alt="Distributed Vector Search Architecture" src="https://github.com/user-attachments/assets/7a9013d4-02c2-4fb0-a609-221fb36434ce" />
+
 
 ## Setup
 
