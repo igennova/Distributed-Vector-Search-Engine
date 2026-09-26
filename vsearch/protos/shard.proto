@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package vsearch;
+
+// One shard of the index, served by its own process.
+service ShardService {
+  // Store a batch of vectors in this shard.
+  rpc Add(AddRequest) returns (AddResponse);
+
+  // Return this shard's k nearest neighbors of the query.
+  rpc Search(SearchRequest) returns (SearchResponse);
+}
+
+message AddRequest {
+  repeated int64 global_ids = 1;
+  int32 dim = 2;
+  repeated float values = 3;   // len(global_ids) * dim floats, one vector after another
+}
+
+message AddResponse {
+  int64 size = 1;              // number of vectors the shard holds after this batch
+}
+
+message SearchRequest {
+  repeated float query = 1;
+  int32 k = 2;
+}
+
+message Hit {
+  int64 global_id = 1;
+  float distance = 2;          // cosine distance: smaller is closer
+}
+
+message SearchResponse {
+  repeated Hit hits = 1;       // closest first
+}

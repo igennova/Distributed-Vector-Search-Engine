@@ -55,3 +55,32 @@
   that crossover.
 - Takeaway: CPU-bound Python needs processes for parallelism. Threads suit I/O-bound work,
   like a coordinator waiting on remote shards.
+
+## Shards as gRPC services
+- Each shard is its own server process (`vsearch/server.py`) exposing `Add` and `Search`
+  from a small `.proto` contract; the coordinator is a gRPC client that only needs a list of
+  addresses. Changing an address to another machine changes nothing else.
+- gRPC over REST/JSON: binary protobuf is smaller and cheaper to parse than JSON text for
+  vectors of floats, the contract is enforced on both sides, and clients can be generated in
+  any language. Qdrant and Milvus expose gRPC for the same reasons. Cost: a codegen step and
+  traffic that isn't human-readable.
+- Vectors are `repeated float` (like Qdrant's API) rather than raw bytes. Raw float32 bytes
+  would be faster to encode, but tie both sides to one dtype and byte order.
+- Fan-out uses gRPC futures: every Search request is sent before waiting on any. The
+  coordinator now only waits on the network, which releases the GIL, so it needs no
+  processes of its own; the CPU work happens inside the shard servers.
+- Uploads are chunked to at most 2 MB per request. gRPC rejects messages over 4 MB by
+  default; a test uploads ~4.5 MB to one shard and fails with RESOURCE_EXHAUSTED if chunking
+  is turned off.
+- Every Search carries a deadline (5s default) so one stuck shard cannot hang a query.
+- Each shard server guards its index with one lock, because an insert mutates the graph while
+  a search could be walking it. Requests to one shard therefore run one at a time; real
+  systems use read-write locks or immutable index segments to serve concurrent reads.
+- Servers bind to 127.0.0.1 by default since the service has no authentication.
+- @ 10k vectors, 4 shards: pipes 1.5ms, gRPC 1.9ms, sequential 5.3ms; recall identical
+  (0.876). gRPC costs ~0.35ms per query more than local pipes. On tiny shards (200 vectors)
+  that overhead cancels the parallel speedup entirely (gRPC 0.60ms vs sequential 0.60ms,
+  while pipes still manage 0.23ms). The overhead-versus-work crossover I expected at the
+  parallel step shows up here, once a real transport sits in between.
+- Current gap: if any shard is unreachable, the whole query fails with UNAVAILABLE (covered by
+  a test). Handling that is the failure-handling step.

@@ -21,6 +21,31 @@ from .hnsw import HNSW
 MODES = ("sequential", "threads", "processes")
 
 
+def route_round_robin(vectors, num_shards, start_id=0):
+    """
+    Split vectors across shards round-robin by global id (global id g goes to shard
+    g % num_shards). Similarity search has no lookup key to route on, so every query
+    has to visit every shard anyway; round-robin just keeps the shards balanced.
+    Returns one (global_ids, vectors) pair per shard.
+    """
+    batches = [([], []) for _ in range(num_shards)]
+    for offset, v in enumerate(vectors):
+        global_id = start_id + offset
+        ids, vecs = batches[global_id % num_shards]
+        ids.append(global_id)
+        vecs.append(v)
+    return batches
+
+
+def merge_top_k(per_shard, k):
+    """Global top-k ids from each shard's (distance, global_id) results.
+
+    Each shard must return its full local top-k (not k / num_shards), because the
+    global top-k can all live in a single shard.
+    """
+    return [global_id for _, global_id in heapq.nsmallest(k, chain.from_iterable(per_shard))]
+
+
 class Shard:
     """One partition of the data: an HNSW index plus a map from its local ids to global ids."""
 
@@ -95,14 +120,8 @@ class Coordinator:
         self._pool = ThreadPoolExecutor(max_workers=num_shards) if mode == "threads" else None
 
     def add(self, vectors):
-        # Round-robin: global id g goes to shard g % num_shards. Similarity search has no
-        # lookup key to route on, so every query has to visit every shard anyway.
-        batches = [([], []) for _ in self.shards]
-        for v in vectors:
-            ids, vecs = batches[self.size % len(self.shards)]
-            ids.append(self.size)
-            vecs.append(v)
-            self.size += 1
+        batches = route_round_robin(vectors, len(self.shards), start_id=self.size)
+        self.size += sum(len(ids) for ids, _ in batches)
 
         if self.mode == "processes":
             # Hand every worker its batch before waiting on any, so the shards build in parallel.
@@ -117,8 +136,7 @@ class Coordinator:
         return self
 
     def search(self, query, k=10):
-        # Scatter: every shard returns its FULL local top-k, not k / num_shards,
-        # because the global top-k can all live in a single shard.
+        # Scatter: ask every shard for its full local top-k.
         if self.mode == "sequential":
             per_shard = [shard.search(query, k) for shard in self.shards]
         elif self.mode == "threads":
@@ -132,8 +150,7 @@ class Coordinator:
             per_shard = [shard.conn.recv() for shard in self.shards]
 
         # Gather + merge: the global top-k is simply the k closest candidates overall.
-        merged = heapq.nsmallest(k, chain.from_iterable(per_shard))
-        return [global_id for _, global_id in merged]
+        return merge_top_k(per_shard, k)
 
     def close(self):
         if self._closed:

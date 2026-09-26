@@ -31,6 +31,10 @@ vsearch/            the engine
   brute_force.py      exact search (baseline)
   hnsw.py             HNSW index
   cluster.py          shards, per-shard worker processes, scatter-gather coordinator
+  server.py           one shard served over gRPC
+  client.py           coordinator for gRPC shards + local cluster launcher
+  protos/shard.proto  the gRPC contract (Add, Search)
+scripts/            gen_protos.sh regenerates the gRPC code from the .proto
 tests/              pytest suite
 benchmarks/         recall / latency / QPS benchmarks
 DECISIONS.md        design decisions and trade-offs
@@ -44,7 +48,35 @@ python -m benchmarks.bench_brute_force   # exact baseline: recall, p50/p99, QPS
 python -m benchmarks.bench_hnsw          # HNSW vs brute force across ef_search
 python -m benchmarks.bench_cluster       # 1 vs 2 vs 4 shards
 python -m benchmarks.bench_parallel      # sequential vs threads vs processes fan-out
+python -m benchmarks.bench_grpc          # shards over local pipes vs over gRPC
 ```
+
+### Running shards as network services
+
+Start one server per shard (each in its own terminal, or on its own machine):
+
+```bash
+python -m vsearch.server --port 50051 --seed 0
+python -m vsearch.server --port 50052 --seed 1
+python -m vsearch.server --port 50053 --seed 2
+python -m vsearch.server --port 50054 --seed 3
+```
+
+Then point a coordinator at them:
+
+```python
+from vsearch.client import GrpcCoordinator
+from vsearch.dataset import make_dataset
+
+vectors, queries = make_dataset()
+with GrpcCoordinator([f"127.0.0.1:{port}" for port in range(50051, 50055)]) as coord:
+    coord.add(vectors)
+    print(coord.search(queries[0], k=10))
+```
+
+Servers listen on `127.0.0.1` by default. The service has no authentication, so only pass
+`--host 0.0.0.0` on a trusted network. Shards keep their data in memory only for now, so a
+restarted server starts empty.
 
 ## Benchmarks
 
@@ -86,6 +118,19 @@ boundaries. Threads are *slower* than sequential: the search makes thousands of 
 that release and reacquire the GIL, and with several threads waiting every release becomes a
 context switch (~12,800 per query with 4 threads). Run it with `python -m benchmarks.bench_parallel`.
 
+Shards as gRPC services (4 shard servers as separate processes, same data and parameters):
+
+| Transport              | 10k vectors: p50 | tiny shards (200 vectors): p50 |
+|------------------------|------------------|--------------------------------|
+| In-process, sequential | ~5.3 ms          | ~0.60 ms                       |
+| Processes over pipes   | ~1.5 ms          | ~0.23 ms                       |
+| gRPC servers           | ~1.9 ms          | ~0.60 ms                       |
+
+Recall is identical across transports (0.876 on 10k). gRPC adds roughly 0.35 ms per query over
+local pipes (protobuf encoding, HTTP/2, and the Python gRPC stack). On 10k vectors that is small
+next to the search itself; on tiny shards it cancels the whole benefit of searching in parallel.
+Run it with `python -m benchmarks.bench_grpc`.
+
 ## Roadmap
 
 - [x] Exact brute-force cosine baseline + benchmark harness
@@ -93,7 +138,7 @@ context switch (~12,800 per query with 4 threads). Run it with `python -m benchm
 - [x] Sharded search: coordinator with scatter-gather and top-K merge (in-process)
 - [x] Parallel fan-out: one long-lived worker process per shard
 - [ ] Index persistence (serialization, mmap)
-- [ ] Shards as network services (gRPC) behind the coordinator
+- [x] Shards as network services (gRPC) behind the coordinator
 - [ ] Replication
 - [ ] Node-failure handling
 - [ ] Write-ahead log / snapshots for durability
