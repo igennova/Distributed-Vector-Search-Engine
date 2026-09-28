@@ -19,8 +19,8 @@ PARAMS = dict(M=16, ef_construction=100, ef_search=50)
 
 def open_coordinator(kind, stack):
     if kind == "grpc":
-        addresses = stack.enter_context(local_grpc_cluster(NUM_SHARDS, seed=0, **PARAMS))
-        return stack.enter_context(GrpcCoordinator(addresses))
+        cluster = stack.enter_context(local_grpc_cluster(NUM_SHARDS, seed=0, **PARAMS))
+        return stack.enter_context(GrpcCoordinator(cluster.addresses))
     mode = "sequential" if kind == "sequential" else "processes"
     return stack.enter_context(Coordinator(NUM_SHARDS, mode=mode, seed=0, **PARAMS))
 

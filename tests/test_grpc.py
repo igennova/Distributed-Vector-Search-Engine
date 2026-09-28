@@ -1,11 +1,10 @@
 """Tests for shards served over gRPC."""
 import socket
 
-import grpc
 import numpy as np
 import pytest
 
-from vsearch.client import GrpcCoordinator, local_grpc_cluster
+from vsearch.client import GrpcCoordinator, ShardUnavailableError, local_grpc_cluster
 from vsearch.cluster import Coordinator
 from vsearch.server import start_server
 
@@ -54,9 +53,9 @@ def test_unreachable_shard_fails_fast():
         s.bind(("127.0.0.1", 0))
         dead_port = s.getsockname()[1]
     with GrpcCoordinator([f"127.0.0.1:{dead_port}"], timeout=2.0) as remote:
-        with pytest.raises(grpc.RpcError) as err:
+        with pytest.raises(ShardUnavailableError) as err:
             remote.search(np.zeros(16, dtype=np.float32), 5)
-    assert err.value.code() == grpc.StatusCode.UNAVAILABLE
+    assert err.value.shards == [0]
 
 
 def test_shards_as_separate_processes():
@@ -65,7 +64,7 @@ def test_shards_as_separate_processes():
     query = rng.standard_normal(16).astype(np.float32)
 
     local = Coordinator(2, seed=0, **PARAMS).add(data)
-    with local_grpc_cluster(2, seed=0, **PARAMS) as addresses, \
-            GrpcCoordinator(addresses) as remote:
+    with local_grpc_cluster(2, seed=0, **PARAMS) as cluster, \
+            GrpcCoordinator(cluster.addresses) as remote:
         remote.add(data)
         assert remote.search(query, 5) == local.search(query, 5)
