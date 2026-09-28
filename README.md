@@ -32,7 +32,7 @@ vsearch/            the engine
   hnsw.py             HNSW index
   cluster.py          shards, per-shard worker processes, scatter-gather coordinator
   server.py           one shard served over gRPC
-  client.py           coordinator for gRPC shards + local cluster launcher
+  client.py           gRPC coordinator (replication, failover) + local cluster launcher
   protos/shard.proto  the gRPC contract (Add, Search)
 scripts/            gen_protos.sh regenerates the gRPC code from the .proto
 tests/              pytest suite
@@ -49,6 +49,7 @@ python -m benchmarks.bench_hnsw          # HNSW vs brute force across ef_search
 python -m benchmarks.bench_cluster       # 1 vs 2 vs 4 shards
 python -m benchmarks.bench_parallel      # sequential vs threads vs processes fan-out
 python -m benchmarks.bench_grpc          # shards over local pipes vs over gRPC
+python -m benchmarks.bench_replication   # 1 vs 2 replicas, and a server crash mid-run
 ```
 
 ### Running shards as network services
@@ -77,6 +78,18 @@ with GrpcCoordinator([f"127.0.0.1:{port}" for port in range(50051, 50055)]) as c
 Servers listen on `127.0.0.1` by default. The service has no authentication, so only pass
 `--host 0.0.0.0` on a trusted network. Shards keep their data in memory only for now, so a
 restarted server starts empty.
+
+For replicas, start more than one server per shard with that shard's seed (for example a second
+set on ports 50061–50064 with `--seed 0` to `--seed 3`) and pass one list of addresses per shard.
+Writes go to every copy, and a search keeps working if a copy dies:
+
+```python
+shards = [[f"127.0.0.1:{50051 + i}", f"127.0.0.1:{50061 + i}"] for i in range(4)]
+with GrpcCoordinator(shards) as coord:
+    coord.add(vectors)
+    ids = coord.search(queries[0])                   # raises ShardUnavailableError if a shard has no live copy
+    ids, missing = coord.search_partial(queries[0])  # or: results from the live shards + the missing ones
+```
 
 ## Benchmarks
 
@@ -131,6 +144,22 @@ local pipes (protobuf encoding, HTTP/2, and the Python gRPC stack). On 10k vecto
 next to the search itself; on tiny shards it cancels the whole benefit of searching in parallel.
 Run it with `python -m benchmarks.bench_grpc`.
 
+Replication (4 shards over gRPC; laptop numbers vary from run to run, so these are ranges over
+three runs):
+
+| Replicas | Servers | recall@10 | p50 latency | build time |
+|----------|---------|-----------|-------------|------------|
+| 1        | 4       | 0.876     | ~1.9–3.5 ms | ~5.8 s     |
+| 2        | 8       | 0.876     | ~2.1–2.7 ms | ~8–10 s    |
+
+A search still reads one copy per shard, so a second replica adds no measurable latency. Writes go
+to both copies, so building takes about 1.5x longer with twice the servers.
+
+Crash test: with 2 replicas, one server is killed (SIGKILL) halfway through 100 queries. All 100
+queries were answered with unchanged recall (0.876). One query failed over to the other copy
+(~3.4 ms instead of ~2 ms); after that the dead server was tried last, so later queries went
+straight to its replica. Run it with `python -m benchmarks.bench_replication`.
+
 ## Roadmap
 
 - [x] Exact brute-force cosine baseline + benchmark harness
@@ -139,8 +168,8 @@ Run it with `python -m benchmarks.bench_grpc`.
 - [x] Parallel fan-out: one long-lived worker process per shard
 - [ ] Index persistence (serialization, mmap)
 - [x] Shards as network services (gRPC) behind the coordinator
-- [ ] Replication
-- [ ] Node-failure handling
+- [x] Replication: write to every replica, read from one, fail over when a server dies
+- [ ] Replica recovery: resync a restarted replica (needs persistence / WAL)
 - [ ] Write-ahead log / snapshots for durability
 - [ ] Benchmarks across growing dataset sizes
 - [ ] Docker / Kubernetes deployment

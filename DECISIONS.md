@@ -84,3 +84,37 @@
   parallel step shows up here, once a real transport sits in between.
 - Current gap: if any shard is unreachable, the whole query fails with UNAVAILABLE (covered by
   a test). Handling that is the failure-handling step.
+
+## Replication and failover
+- More shards made the system more fragile: a query needs every shard, so with servers up 99%
+  of the time only ~96% of 4-shard queries would succeed. Each shard now has several replicas on
+  different servers (2 in the benchmarks).
+- Writes go to every replica (write-all) and fail if any replica fails, so copies cannot
+  silently diverge; the coordinator also checks that replicas report the same size. Quorum
+  writes (W of N replicas) would keep writes available while a replica is down, but the missed
+  replica then needs a log to catch up, which comes with persistence.
+- Reads need one replica per shard. The starting replica rotates per query (round-robin), which
+  spreads read load across copies. Hedged requests (ask two copies, keep the first answer) would
+  cut tail latency at double the work.
+- A read that fails with UNAVAILABLE or DEADLINE_EXCEEDED is retried on the shard's next
+  replica; retries for different shards go out in parallel. A failed replica is tried last for
+  5 s (a simple circuit breaker) but never skipped entirely, so a server that comes back is
+  used again.
+- If every replica of a shard is down, search() raises ShardUnavailableError, and
+  search_partial() returns results from the remaining shards plus the missing shard ids. That
+  is the availability-vs-completeness trade-off, left to the caller; Elasticsearch similarly
+  returns partial results and reports failed shards.
+- Replicas stay identical here because they get the same writes in the same order with the same
+  seed. Real systems replicate the data itself or an operation log instead of relying on a
+  deterministic rebuild.
+- Results @ 10k vectors, 4 shards: search p50 was about 2 ms with 1 or 2 replicas, and the
+  difference was within noise across three runs (1.9–3.5 ms vs 2.1–2.7 ms), since a search still
+  reads one copy per shard. Build time went from ~5.8 s to ~8–10 s: twice the servers doing twice
+  the writes on 4 performance cores.
+- The first benchmark run showed 1 replica slower than 2 (3.5 vs 2.4 ms). Two re-runs showed it
+  was noise rather than an effect, so these notes report ranges instead of a single run.
+- Crash test: one of 8 servers killed with SIGKILL halfway through 100 queries. 100/100 queries
+  answered, recall unchanged (0.876), one failover. That query took ~3.4 ms against a ~2 ms
+  p50; afterwards the circuit breaker kept queries off the dead server.
+- Gap: a replica that restarts comes back empty, and nothing resyncs it yet. That needs
+  persistence and a write-ahead log.
