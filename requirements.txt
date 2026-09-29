@@ -1,5 +1,7 @@
 numpy
 grpcio>=1.84.0
 protobuf>=7.35.1
-grpcio-tools>=1.84.0   # only needed to regenerate code from the .proto (scripts/gen_protos.sh)
+# Only used to regenerate code from the .proto (scripts/gen_protos.sh). Pinned so the
+# generated files are reproducible; CI checks them against a fresh regeneration.
+grpcio-tools==1.84.0
 pytest

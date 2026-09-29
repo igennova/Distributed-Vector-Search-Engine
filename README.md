@@ -1,5 +1,7 @@
 # Distributed Vector Search Engine
 
+[![CI](https://github.com/igennova/Distributed-Vector-Search-Engine/actions/workflows/ci.yml/badge.svg)](https://github.com/igennova/Distributed-Vector-Search-Engine/actions/workflows/ci.yml)
+
 A distributed approximate-nearest-neighbor (ANN) search engine built from scratch in Python —
 covering indexing, sharding, query routing, replication, and distributed query execution. The
 focus is on understanding the internals of systems like Qdrant, Milvus, and Pinecone rather than
