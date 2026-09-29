@@ -57,6 +57,10 @@ class Shard:
         self.index.insert(vector)
         self.global_ids.append(global_id)
 
+    def add_batch(self, global_ids, vectors):
+        for global_id, vector in zip(global_ids, vectors):
+            self.add(int(global_id), vector)
+
     def search(self, query, k):
         """This shard's top-k as (distance, global_id) pairs."""
         return [(dist, self.global_ids[local_id])
