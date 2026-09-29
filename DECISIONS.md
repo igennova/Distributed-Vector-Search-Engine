@@ -118,3 +118,44 @@
   p50; afterwards the circuit breaker kept queries off the dead server.
 - Gap: a replica that restarts comes back empty, and nothing resyncs it yet. That needs
   persistence and a write-ahead log.
+
+## Durability: snapshots + write-ahead log
+- Options considered: snapshots only (loses writes since the last one), log only (restart
+  replays everything), snapshot + log (loses nothing, restarts fast), immutable segments
+  (Lucene, Milvus; a bigger redesign of the index), keeping the index on disk (mmap), and
+  rebuilding from an external source of truth. Snapshot + log gives zero loss of acknowledged
+  writes (RPO) and a short replay (RTO), and it is what Postgres, SQLite, and Qdrant do.
+- Write path: append the batch to the log, fsync, apply it to the in-memory index, then reply.
+  Anything the server has acknowledged is on disk first.
+- Log record: [length][crc32][seq | count | dim | ids | vectors]. Recovery stops at the first
+  record that is cut short or fails its checksum and truncates the file there, which is what a
+  crash mid-append leaves. Like Postgres and SQLite, a bad record is treated as the end of the
+  log; records after it are not trusted.
+- Every write gets a sequence number, and the snapshot records the last one it contains.
+  Recovery skips log records at or below it, because a crash can land between writing a
+  snapshot and emptying the log. That makes replay safe to repeat.
+- Snapshots are written to a temp file, fsynced, renamed over the old one, and the directory is
+  fsynced. A rename is atomic, so a crash mid-save keeps the previous snapshot intact.
+- Snapshots are plain numpy arrays (adjacency lists flattened into offsets + neighbors) rather
+  than pickle: faster, and loading a pickle can execute code.
+- The snapshot also stores the random generator's state. HNSW draws each node's level from it,
+  and replicas only stay identical if they keep drawing the same sequence. A test shows that
+  reseeding instead makes the graph diverge.
+- Each safety check was verified by removing it in a copy of the code: dropping the seq skip,
+  the checksum, the torn-tail truncation, or the generator restore each makes its test fail.
+- Results (one 2,500-vector shard, MacBook SSD): a log append costs ~1.9 µs without fsync and
+  ~22 µs with it. Written through the log, a shard still takes ~850 writes/s either way, since
+  the HNSW insert (~1.1 ms) dwarfs the fsync. Restarting from the log (1.3 MB) takes ~4.4 s
+  because every vector is re-inserted; loading a snapshot (1.9 MB) takes ~3.5 ms. The snapshot
+  is bigger than the log because it stores the graph too.
+- macOS caveat: plain fsync hands data to the drive but does not flush the drive's own cache.
+  F_FULLFSYNC does, and costs ~3.4 ms per append, about 150x more. So `--fsync always` here
+  survives a process or OS crash, but not necessarily a power cut. (SQLite exposes the same
+  choice as `PRAGMA fullfsync`.)
+- Process kills can't show the difference between fsync modes: data already handed to the OS
+  survives the process dying. Only a power or kernel failure loses unsynced writes, which the
+  tests can't simulate.
+- Because writes fail whenever a replica is down, a server that was down never missed an
+  acknowledged write, so reloading its own disk is enough to rejoin. The remaining gap is a
+  write that reached one replica but failed on the other; fixing that needs a resync from the
+  healthy copy.

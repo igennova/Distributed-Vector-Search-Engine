@@ -32,6 +32,7 @@ vsearch/            the engine
   hnsw.py             HNSW index
   cluster.py          shards, per-shard worker processes, scatter-gather coordinator
   server.py           one shard served over gRPC
+  storage.py          snapshots + write-ahead log, so a shard survives restarts
   client.py           gRPC coordinator (replication, failover) + local cluster launcher
   protos/shard.proto  the gRPC contract (Add, Search)
 scripts/            gen_protos.sh regenerates the gRPC code from the .proto
@@ -50,6 +51,7 @@ python -m benchmarks.bench_cluster       # 1 vs 2 vs 4 shards
 python -m benchmarks.bench_parallel      # sequential vs threads vs processes fan-out
 python -m benchmarks.bench_grpc          # shards over local pipes vs over gRPC
 python -m benchmarks.bench_replication   # 1 vs 2 replicas, and a server crash mid-run
+python -m benchmarks.bench_persistence   # fsync cost, and restart from log vs snapshot
 ```
 
 ### Running shards as network services
@@ -76,8 +78,20 @@ with GrpcCoordinator([f"127.0.0.1:{port}" for port in range(50051, 50055)]) as c
 ```
 
 Servers listen on `127.0.0.1` by default. The service has no authentication, so only pass
-`--host 0.0.0.0` on a trusted network. Shards keep their data in memory only for now, so a
-restarted server starts empty.
+`--host 0.0.0.0` on a trusted network.
+
+By default a shard lives in memory only, so a restarted server starts empty. Give each server
+its own `--data-dir` and it keeps a snapshot plus a write-ahead log there, and recovers both
+on startup:
+
+```bash
+python -m vsearch.server --port 50051 --seed 0 --data-dir data/shard-0
+# recovered 2500 vectors from data/shard-0 (snapshot at seq 1, replayed 0 log records)
+```
+
+`--fsync always` (the default) forces every log write to disk before the server replies;
+`--fsync off` is faster but can lose the last writes if the machine loses power.
+`--snapshot-every N` takes a snapshot after every N written vectors.
 
 For replicas, start more than one server per shard with that shard's seed (for example a second
 set on ports 50061–50064 with `--seed 0` to `--seed 3`) and pass one list of addresses per shard.
@@ -160,17 +174,35 @@ queries were answered with unchanged recall (0.876). One query failed over to th
 (~3.4 ms instead of ~2 ms); after that the dead server was tried last, so later queries went
 straight to its replica. Run it with `python -m benchmarks.bench_replication`.
 
+Persistence (one shard of 2,500 vectors, dim 128, on a MacBook SSD):
+
+| Log append, no index work      | per append |
+|--------------------------------|------------|
+| No fsync                       | ~1.9 µs    |
+| `fsync`                        | ~22 µs     |
+| `F_FULLFSYNC` (macOS)          | ~3.4 ms    |
+
+| Restart of the shard           | time       |
+|--------------------------------|------------|
+| Replay the whole log (1.3 MB)  | ~4.4 s     |
+| Load a snapshot (1.9 MB)       | ~3.5 ms    |
+
+Writing each vector through the log barely changes write throughput (~850 writes/s with or
+without it), because the HNSW insert (~1.1 ms) dwarfs a 22 µs fsync. Replaying the log means
+re-inserting every vector, while a snapshot loads the finished graph, which is why periodic
+snapshots matter. On macOS, plain `fsync` does not flush the drive's own cache; only
+`F_FULLFSYNC` does, at about 150x the cost. Run it with `python -m benchmarks.bench_persistence`.
+
 ## Roadmap
 
 - [x] Exact brute-force cosine baseline + benchmark harness
 - [x] HNSW index (graph-based ANN), single node
 - [x] Sharded search: coordinator with scatter-gather and top-K merge (in-process)
 - [x] Parallel fan-out: one long-lived worker process per shard
-- [ ] Index persistence (serialization, mmap)
 - [x] Shards as network services (gRPC) behind the coordinator
 - [x] Replication: write to every replica, read from one, fail over when a server dies
-- [ ] Replica recovery: resync a restarted replica (needs persistence / WAL)
-- [ ] Write-ahead log / snapshots for durability
+- [x] Durability: snapshots + write-ahead log; a restarted server recovers its data
+- [ ] Replica resync: copy data from a healthy twin when a replica missed writes
 - [ ] Benchmarks across growing dataset sizes
 - [ ] Docker / Kubernetes deployment
 
