@@ -178,12 +178,23 @@ def _free_ports(n):
             s.close()
 
 
+def _wait_until_ready(address, timeout=20):
+    with grpc.insecure_channel(address) as channel:
+        grpc.channel_ready_future(channel).result(timeout=timeout)
+
+
 class LocalCluster:
     """Shard servers running as local processes. addresses[shard][replica] is "host:port"."""
 
-    def __init__(self, addresses, processes):
+    def __init__(self, addresses, commands, cwd):
         self.addresses = addresses
-        self.processes = processes
+        self._commands = commands
+        self._cwd = cwd
+        self.processes = [[None] * len(group) for group in addresses]
+
+    def start(self, shard, replica):
+        self.processes[shard][replica] = subprocess.Popen(
+            self._commands[shard][replica], cwd=self._cwd, stdout=subprocess.DEVNULL)
 
     def kill(self, shard, replica=0):
         """Kill one server abruptly (SIGKILL), as if its machine had crashed."""
@@ -191,40 +202,55 @@ class LocalCluster:
         process.kill()
         process.wait()
 
+    def restart(self, shard, replica=0):
+        """Start a stopped server again on the same address (and data directory)."""
+        self.start(shard, replica)
+        _wait_until_ready(self.addresses[shard][replica])
+
+    def stop_all(self):
+        running = [p for group in self.processes for p in group if p is not None]
+        for process in running:
+            if process.poll() is None:
+                process.terminate()
+        for process in running:
+            process.wait(timeout=10)
+
 
 @contextmanager
-def local_grpc_cluster(num_shards, replicas=1, seed=None, **hnsw_params):
+def local_grpc_cluster(num_shards, replicas=1, seed=None, data_dir=None, **server_args):
     """Run num_shards x replicas shard servers as separate local processes.
 
     Every replica of a shard gets the same seed, so the same writes build identical indexes.
+    With data_dir, each server keeps its snapshot and write-ahead log in its own
+    subdirectory, so a restarted server recovers its data. Other keyword arguments are
+    passed to every server as command-line flags (M, ef_construction, fsync, ...).
     """
     repo_root = Path(__file__).resolve().parent.parent
     ports = iter(_free_ports(num_shards * replicas))
-    processes, addresses = [], []
+    addresses, commands = [], []
+    for shard in range(num_shards):
+        addresses.append([])
+        commands.append([])
+        for replica in range(replicas):
+            port = next(ports)
+            cmd = [sys.executable, "-m", "vsearch.server", "--port", str(port)]
+            for key, value in server_args.items():
+                cmd += [f"--{key.replace('_', '-')}", str(value)]
+            if seed is not None:
+                cmd += ["--seed", str(seed + shard)]
+            if data_dir is not None:
+                cmd += ["--data-dir", str(Path(data_dir) / f"shard-{shard}-replica-{replica}")]
+            addresses[shard].append(f"127.0.0.1:{port}")
+            commands[shard].append(cmd)
+
+    cluster = LocalCluster(addresses, commands, repo_root)
     try:
         for shard in range(num_shards):
-            processes.append([])
-            addresses.append([])
-            for _ in range(replicas):
-                port = next(ports)
-                cmd = [sys.executable, "-m", "vsearch.server", "--port", str(port)]
-                for key, value in hnsw_params.items():
-                    cmd += [f"--{key.replace('_', '-')}", str(value)]
-                if seed is not None:
-                    cmd += ["--seed", str(seed + shard)]
-                processes[shard].append(
-                    subprocess.Popen(cmd, cwd=repo_root, stdout=subprocess.DEVNULL))
-                addresses[shard].append(f"127.0.0.1:{port}")
-
+            for replica in range(replicas):
+                cluster.start(shard, replica)
         for group in addresses:
             for address in group:
-                with grpc.insecure_channel(address) as channel:
-                    grpc.channel_ready_future(channel).result(timeout=20)
-        yield LocalCluster(addresses, processes)
+                _wait_until_ready(address)
+        yield cluster
     finally:
-        all_processes = [p for group in processes for p in group]
-        for process in all_processes:
-            if process.poll() is None:
-                process.terminate()
-        for process in all_processes:
-            process.wait(timeout=10)
+        cluster.stop_all()
