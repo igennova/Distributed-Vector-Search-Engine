@@ -159,3 +159,42 @@
   acknowledged write, so reloading its own disk is enough to rejoin. The remaining gap is a
   write that reached one replica but failed on the other; fixing that needs a resync from the
   healthy copy.
+
+## Replica resync
+- The gap: a write can land on one replica and fail on the other. The shard's copies then
+  differ, and a replica whose disk is lost comes back empty.
+- Sequence numbers now come from the coordinator. Each write carries the seq it must get, and a
+  durable replica rejects it unless it is exactly its last seq + 1. Without this, a replica that
+  missed seq 5 would take the next write as its own seq 5, so "seq 5" would mean different
+  writes on different copies and copying a log by seq would copy the wrong data. It is the same
+  idea as Raft checking the previous log index before appending.
+- Before writing, the coordinator asks each replica for its last seq (`Status`). If replicas
+  disagree it refuses the write (`ReplicasOutOfSyncError`) instead of piling new writes on top of
+  different histories. After a failed write it forgets what it knew, so the next write re-checks.
+  This assumes one coordinator writing at a time.
+- `repair()` finds the replica with the highest seq for each shard and tells each replica that is
+  behind to `SyncFrom` it. The data goes directly between the two replicas; the coordinator only
+  decides who copies from whom, so it is not in the data path.
+- Catch-up tries the peer's log first (`FetchLog` after my last seq). If the peer has already
+  folded those writes into its snapshot and emptied its log, it answers FAILED_PRECONDITION, and
+  the replica copies the snapshot (`FetchSnapshot`, streamed in 1 MB chunks under gRPC's 4 MB
+  limit), then fetches any newer log records. Postgres standbys (WAL streaming, or a base backup
+  when the WAL is gone) and Raft (AppendEntries, or InstallSnapshot) work the same way.
+- Repair rolls forward: a write that failed on some replicas but landed on one ends up applied
+  on all of them. The caller saw an error for a write that did happen. Making retries safe would
+  take idempotent writes (a client-chosen write id the servers deduplicate on); not done yet.
+- A replica that is catching up holds its own lock for the whole sync, so searches sent to it
+  wait until the sync finishes, or hit their deadline and fail over to its twin.
+- Results, one 2,500-vector shard on localhost, two runs: catching up 50 / 500 / 2,000 missed
+  vectors from the log took ~0.14 / ~1.3 / ~4.2 s. Rebuilding an empty replica from the
+  snapshot took ~0.01 s for 1.9 MB.
+- That surprised me: at this size the snapshot wins even for a 50-vector gap. Applying a log
+  record means re-inserting its vectors into the HNSW graph (~2 ms each), while a snapshot ships
+  the finished graph. In a database where applying a record is cheap the log wins; in a vector
+  index, inserts are the expensive part. The balance still flips for big shards, where a
+  snapshot is gigabytes to send. A better policy would pick the method from the gap size versus
+  the snapshot size and network bandwidth, instead of always trying the log first.
+- Each safety check was verified by removing it in a copy of the code: the "log no longer
+  covers it" check, the fall-back to the snapshot, the server's exact-next-seq check, refusing
+  writes while replicas disagree, and forgetting seqs after a failed write. Each removal makes
+  a test fail.

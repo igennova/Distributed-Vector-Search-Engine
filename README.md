@@ -33,9 +33,9 @@ vsearch/            the engine
   brute_force.py      exact search (baseline)
   hnsw.py             HNSW index
   cluster.py          shards, per-shard worker processes, scatter-gather coordinator
-  server.py           one shard served over gRPC
+  server.py           one shard served over gRPC, plus replica catch-up
   storage.py          snapshots + write-ahead log, so a shard survives restarts
-  client.py           gRPC coordinator (replication, failover) + local cluster launcher
+  client.py           gRPC coordinator (replication, failover, repair) + local cluster launcher
   protos/shard.proto  the gRPC contract (Add, Search)
 scripts/            gen_protos.sh regenerates the gRPC code from the .proto
 tests/              pytest suite
@@ -54,6 +54,7 @@ python -m benchmarks.bench_parallel      # sequential vs threads vs processes fa
 python -m benchmarks.bench_grpc          # shards over local pipes vs over gRPC
 python -m benchmarks.bench_replication   # 1 vs 2 replicas, and a server crash mid-run
 python -m benchmarks.bench_persistence   # fsync cost, and restart from log vs snapshot
+python -m benchmarks.bench_resync        # catching up a replica: from the log vs a snapshot
 ```
 
 ### Running shards as network services
@@ -94,6 +95,14 @@ python -m vsearch.server --port 50051 --seed 0 --data-dir data/shard-0
 `--fsync always` (the default) forces every log write to disk before the server replies;
 `--fsync off` is faster but can lose the last writes if the machine loses power.
 `--snapshot-every N` takes a snapshot after every N written vectors.
+
+If a write reaches some replicas of a shard but not others, or a replica loses its disk, the
+coordinator refuses new writes to that shard until the copies agree again. `repair()` brings
+every replica level with the most up-to-date copy of its shard (this needs `--data-dir`):
+
+```python
+synced = coord.repair()   # one ReplicaSync per replica that caught up, via "log" or "snapshot"
+```
 
 For replicas, start more than one server per shard with that shard's seed (for example a second
 set on ports 50061–50064 with `--seed 0` to `--seed 3`) and pass one list of addresses per shard.
@@ -195,6 +204,21 @@ re-inserting every vector, while a snapshot loads the finished graph, which is w
 snapshots matter. On macOS, plain `fsync` does not flush the drive's own cache; only
 `F_FULLFSYNC` does, at about 150x the cost. Run it with `python -m benchmarks.bench_persistence`.
 
+Replica resync (a replica of a 2,500-vector shard catching up from its twin over gRPC, localhost):
+
+| Replica missed          | Method   | Time      |
+|-------------------------|----------|-----------|
+| 50 vectors              | log      | ~0.14 s   |
+| 500 vectors             | log      | ~1.3 s    |
+| 2,000 vectors           | log      | ~4.2 s    |
+| everything (empty disk) | snapshot | ~0.01 s   |
+
+Catching up from the log means re-inserting every missed vector into the HNSW graph (~2 ms
+each), so its cost grows with the gap. Copying a snapshot ships the finished graph (1.9 MB
+here), so at this size it wins even for a 50-vector gap. The balance shifts as shards grow:
+a snapshot of a large shard is gigabytes to send, while a small gap stays cheap from the log.
+Run it with `python -m benchmarks.bench_resync`.
+
 ## Roadmap
 
 - [x] Exact brute-force cosine baseline + benchmark harness
@@ -204,7 +228,7 @@ snapshots matter. On macOS, plain `fsync` does not flush the drive's own cache; 
 - [x] Shards as network services (gRPC) behind the coordinator
 - [x] Replication: write to every replica, read from one, fail over when a server dies
 - [x] Durability: snapshots + write-ahead log; a restarted server recovers its data
-- [ ] Replica resync: copy data from a healthy twin when a replica missed writes
+- [x] Replica resync: a replica that missed writes or lost its disk catches up from its twin
 - [ ] Benchmarks across growing dataset sizes
 - [ ] Docker / Kubernetes deployment
 
