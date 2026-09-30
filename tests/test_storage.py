@@ -1,8 +1,9 @@
 """Tests for snapshots, the write-ahead log, and recovery after a crash."""
 import numpy as np
+import pytest
 
 from vsearch.cluster import Shard
-from vsearch.storage import DurableShard, load_snapshot, save_snapshot
+from vsearch.storage import DurableShard, OutOfOrderWrite, load_snapshot, save_snapshot
 
 PARAMS = dict(M=8, ef_construction=32, ef_search=32, seed=0)
 QUERIES = np.random.default_rng(2).standard_normal((10, 16)).astype(np.float32)
@@ -140,3 +141,44 @@ def test_crash_between_snapshot_and_log_reset_does_not_duplicate(tmp_path):
     assert recovered.replayed_records == 0                         # every record is already in the snapshot
     assert len(recovered) == sum(len(ids) for ids, _ in batches)
     assert _results(recovered) == _results(_reference(batches))
+
+
+def test_out_of_order_write_is_rejected(tmp_path):
+    batches = _batches()
+    shard = DurableShard(tmp_path, snapshot_every=0, **PARAMS)
+    shard.add_batch(*batches[0], seq=1)
+    with pytest.raises(OutOfOrderWrite):
+        shard.add_batch(*batches[1], seq=3)                        # seq 2 is missing
+    with pytest.raises(OutOfOrderWrite):
+        shard.add_batch(*batches[1], seq=1)                        # seq 1 is already applied
+    assert shard.last_seq == 1
+    assert len(shard) == len(batches[0][0])
+
+
+def test_records_after_says_when_the_log_no_longer_covers_them(tmp_path):
+    batches = _batches()
+    shard = DurableShard(tmp_path, snapshot_every=0, **PARAMS)
+    for ids, vectors in batches[:3]:
+        shard.add_batch(ids, vectors)
+    assert [seq for seq, _, _ in shard.records_after(1)] == [2, 3]
+
+    shard.checkpoint()                                             # seqs 1-3 now only in the snapshot
+    shard.add_batch(*batches[3])
+    assert shard.records_after(1) is None
+    assert [seq for seq, _, _ in shard.records_after(3)] == [4]
+
+
+def test_install_snapshot_copies_a_peer_exactly(tmp_path):
+    batches = _batches()
+    peer = DurableShard(tmp_path / "peer", snapshot_every=0, **PARAMS)
+    for ids, vectors in batches:
+        peer.add_batch(ids, vectors)
+    data, last_seq = peer.snapshot_bytes()
+
+    copy = DurableShard(tmp_path / "copy", snapshot_every=0, **PARAMS)
+    copy.install_snapshot(data)
+    assert copy.last_seq == last_seq == len(batches)
+    assert _results(copy) == _results(peer)
+
+    copy.close()                                                   # and it survives a restart
+    assert _results(DurableShard(tmp_path / "copy", snapshot_every=0, **PARAMS)) == _results(peer)

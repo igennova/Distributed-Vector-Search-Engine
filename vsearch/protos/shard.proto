@@ -9,12 +9,21 @@ service ShardService {
 
   // Return this shard's k nearest neighbors of the query.
   rpc Search(SearchRequest) returns (SearchResponse);
+
+  // Replica resync. A replica that fell behind catches up from a peer with FetchLog,
+  // or with FetchSnapshot when the peer's log no longer reaches back far enough.
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc FetchLog(FetchLogRequest) returns (stream LogRecord);
+  rpc FetchSnapshot(FetchSnapshotRequest) returns (stream SnapshotChunk);
+  rpc SyncFrom(SyncFromRequest) returns (SyncFromResponse);
 }
 
 message AddRequest {
   repeated int64 global_ids = 1;
   int32 dim = 2;
   repeated float values = 3;   // len(global_ids) * dim floats, one vector after another
+  uint64 seq = 4;              // sequence number this write must get (0 = unchecked); a durable
+                               // replica rejects it unless it equals its last seq + 1
 }
 
 message AddResponse {
@@ -33,4 +42,41 @@ message Hit {
 
 message SearchResponse {
   repeated Hit hits = 1;       // closest first
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  int64 size = 1;
+  bool durable = 2;            // false for in-memory shards, which don't number their writes
+  uint64 last_seq = 3;         // last write this replica has applied
+  uint64 snapshot_seq = 4;     // last write covered by its snapshot; its log holds only later ones
+}
+
+message FetchLogRequest {
+  uint64 after_seq = 1;
+}
+
+message LogRecord {
+  uint64 seq = 1;
+  repeated int64 global_ids = 2;
+  int32 dim = 3;
+  repeated float values = 4;
+}
+
+message FetchSnapshotRequest {}
+
+message SnapshotChunk {
+  bytes data = 1;              // consecutive pieces of the snapshot file
+  uint64 last_seq = 2;         // last write the snapshot covers
+}
+
+message SyncFromRequest {
+  string peer = 1;             // address of the replica to copy from
+}
+
+message SyncFromResponse {
+  string method = 1;           // "log" or "snapshot"
+  int64 records_applied = 2;   // log records applied (after the snapshot, if one was copied)
+  uint64 last_seq = 3;
 }

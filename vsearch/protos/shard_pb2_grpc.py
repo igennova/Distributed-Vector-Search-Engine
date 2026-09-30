@@ -45,6 +45,26 @@ class ShardServiceStub:
                 request_serializer=vsearch_dot_protos_dot_shard__pb2.SearchRequest.SerializeToString,
                 response_deserializer=vsearch_dot_protos_dot_shard__pb2.SearchResponse.FromString,
                 _registered_method=True)
+        self.Status = channel.unary_unary(
+                '/vsearch.ShardService/Status',
+                request_serializer=vsearch_dot_protos_dot_shard__pb2.StatusRequest.SerializeToString,
+                response_deserializer=vsearch_dot_protos_dot_shard__pb2.StatusResponse.FromString,
+                _registered_method=True)
+        self.FetchLog = channel.unary_stream(
+                '/vsearch.ShardService/FetchLog',
+                request_serializer=vsearch_dot_protos_dot_shard__pb2.FetchLogRequest.SerializeToString,
+                response_deserializer=vsearch_dot_protos_dot_shard__pb2.LogRecord.FromString,
+                _registered_method=True)
+        self.FetchSnapshot = channel.unary_stream(
+                '/vsearch.ShardService/FetchSnapshot',
+                request_serializer=vsearch_dot_protos_dot_shard__pb2.FetchSnapshotRequest.SerializeToString,
+                response_deserializer=vsearch_dot_protos_dot_shard__pb2.SnapshotChunk.FromString,
+                _registered_method=True)
+        self.SyncFrom = channel.unary_unary(
+                '/vsearch.ShardService/SyncFrom',
+                request_serializer=vsearch_dot_protos_dot_shard__pb2.SyncFromRequest.SerializeToString,
+                response_deserializer=vsearch_dot_protos_dot_shard__pb2.SyncFromResponse.FromString,
+                _registered_method=True)
 
 
 class ShardServiceServicer:
@@ -65,6 +85,32 @@ class ShardServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Status(self, request, context):
+        """Replica resync. A replica that fell behind catches up from a peer with FetchLog,
+        or with FetchSnapshot when the peer's log no longer reaches back far enough.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def FetchLog(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def FetchSnapshot(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SyncFrom(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ShardServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -77,6 +123,26 @@ def add_ShardServiceServicer_to_server(servicer, server):
                     servicer.Search,
                     request_deserializer=vsearch_dot_protos_dot_shard__pb2.SearchRequest.FromString,
                     response_serializer=vsearch_dot_protos_dot_shard__pb2.SearchResponse.SerializeToString,
+            ),
+            'Status': grpc.unary_unary_rpc_method_handler(
+                    servicer.Status,
+                    request_deserializer=vsearch_dot_protos_dot_shard__pb2.StatusRequest.FromString,
+                    response_serializer=vsearch_dot_protos_dot_shard__pb2.StatusResponse.SerializeToString,
+            ),
+            'FetchLog': grpc.unary_stream_rpc_method_handler(
+                    servicer.FetchLog,
+                    request_deserializer=vsearch_dot_protos_dot_shard__pb2.FetchLogRequest.FromString,
+                    response_serializer=vsearch_dot_protos_dot_shard__pb2.LogRecord.SerializeToString,
+            ),
+            'FetchSnapshot': grpc.unary_stream_rpc_method_handler(
+                    servicer.FetchSnapshot,
+                    request_deserializer=vsearch_dot_protos_dot_shard__pb2.FetchSnapshotRequest.FromString,
+                    response_serializer=vsearch_dot_protos_dot_shard__pb2.SnapshotChunk.SerializeToString,
+            ),
+            'SyncFrom': grpc.unary_unary_rpc_method_handler(
+                    servicer.SyncFrom,
+                    request_deserializer=vsearch_dot_protos_dot_shard__pb2.SyncFromRequest.FromString,
+                    response_serializer=vsearch_dot_protos_dot_shard__pb2.SyncFromResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -134,6 +200,114 @@ class ShardService:
             '/vsearch.ShardService/Search',
             vsearch_dot_protos_dot_shard__pb2.SearchRequest.SerializeToString,
             vsearch_dot_protos_dot_shard__pb2.SearchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Status(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/vsearch.ShardService/Status',
+            vsearch_dot_protos_dot_shard__pb2.StatusRequest.SerializeToString,
+            vsearch_dot_protos_dot_shard__pb2.StatusResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def FetchLog(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/vsearch.ShardService/FetchLog',
+            vsearch_dot_protos_dot_shard__pb2.FetchLogRequest.SerializeToString,
+            vsearch_dot_protos_dot_shard__pb2.LogRecord.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def FetchSnapshot(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/vsearch.ShardService/FetchSnapshot',
+            vsearch_dot_protos_dot_shard__pb2.FetchSnapshotRequest.SerializeToString,
+            vsearch_dot_protos_dot_shard__pb2.SnapshotChunk.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SyncFrom(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/vsearch.ShardService/SyncFrom',
+            vsearch_dot_protos_dot_shard__pb2.SyncFromRequest.SerializeToString,
+            vsearch_dot_protos_dot_shard__pb2.SyncFromResponse.FromString,
             options,
             channel_credentials,
             insecure,

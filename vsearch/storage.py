@@ -26,6 +26,10 @@ _HEADER = struct.Struct("<II")         # payload length, crc32
 _RECORD_START = struct.Struct("<QII")  # seq, count, dim
 
 
+class OutOfOrderWrite(ValueError):
+    """A write arrived with a sequence number other than this shard's next one."""
+
+
 def _fsync_dir(path):
     """Make a rename inside `path` durable: the directory entry itself must reach disk."""
     fd = os.open(path, os.O_RDONLY)
@@ -215,8 +219,14 @@ class DurableShard:
             self.vectors_since_snapshot += len(ids)
         self.wal.recovered = None
 
-    def add_batch(self, global_ids, vectors):
-        seq = self.last_seq + 1
+    def add_batch(self, global_ids, vectors, seq=None):
+        """Log and apply one write. If `seq` is given it must be exactly the next one, so the
+        same write gets the same number on every replica (what log catch-up relies on)."""
+        expected = self.last_seq + 1
+        if seq is not None and seq != expected:
+            raise OutOfOrderWrite(
+                f"write seq {seq} does not follow this replica's last seq {self.last_seq}")
+        seq = expected
         self.wal.append(seq, global_ids, vectors)   # durable before anything else happens
         self.shard.add_batch(global_ids, vectors)
         self.last_seq = seq
@@ -228,6 +238,37 @@ class DurableShard:
         """Snapshot everything written so far, then empty the log."""
         save_snapshot(self.shard, self.last_seq, self.snapshot_path)
         self.wal.reset()
+        self.snapshot_seq = self.last_seq
+        self.vectors_since_snapshot = 0
+
+    def records_after(self, after_seq):
+        """Log records with seq > after_seq, or None if the log no longer holds all of them
+        (they were folded into the snapshot and the log was emptied)."""
+        if after_seq < self.snapshot_seq:
+            return None
+        records, _ = _read_records(self.wal.path)
+        return [record for record in records if record[0] > after_seq]
+
+    def snapshot_bytes(self):
+        """The current snapshot file and the last seq it covers, taking one first if needed."""
+        if not self.snapshot_path.exists():
+            self.checkpoint()
+        return self.snapshot_path.read_bytes(), self.snapshot_seq
+
+    def install_snapshot(self, data):
+        """Replace this shard's whole state with a snapshot copied from a peer."""
+        tmp = self.snapshot_path.with_name(self.snapshot_path.name + ".tmp")
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.snapshot_path)
+        _fsync_dir(self.data_dir)
+        # Any log records left over are older than the new snapshot, so recovery would skip
+        # them anyway; emptying the log just keeps it tidy.
+        self.wal.reset()
+        self.shard, self.last_seq = load_snapshot(self.snapshot_path,
+                                                  ef_search=self.shard.index.ef_search)
         self.snapshot_seq = self.last_seq
         self.vectors_since_snapshot = 0
 
