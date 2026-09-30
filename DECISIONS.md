@@ -198,3 +198,36 @@
   covers it" check, the fall-back to the snapshot, the server's exact-next-seq check, refusing
   writes while replicas disagree, and forgetting seqs after a failed write. Each removal makes
   a test fail.
+
+## Faster distance computation
+- Numbers in the sections above were measured before this change; the README has the current
+  ones.
+- Profiled first (cProfile, building 2,500 vectors): 84% of the time was in the distance
+  function. `np.linalg.norm` alone was 57% of the total, 7 million calls, because every distance
+  recomputed both vectors' lengths. The 3.5 million distance calls each did a few hundred
+  multiply-adds but paid full Python + numpy call overhead.
+- Fix: normalize each vector once on insert, so cosine distance is `1 - dot`; keep all vectors
+  in one contiguous float32 matrix that doubles its capacity when full (amortized O(1) append,
+  like a Python list); compute a whole neighbor list's distances with one matrix-vector product;
+  and reuse the distances the beam search already computed when picking neighbors instead of
+  computing them again.
+- Same algorithm, same recall. 10k vectors, M=16, ef=200: build ~42 s → ~9–14 s, search p50
+  ~5.2 ms → ~1.0–1.3 ms, recall 0.930 both times. All tests pass unchanged.
+- After the change the vector math no longer appears near the top of the profile. What's left is
+  the Python beam-search loop: heap pushes and pops, visited-set updates, and 3 million `len()`
+  calls. Going much further would need compiled code (Numba, Cython, or C++ as in hnswlib).
+- Costs, as expected: the index only does cosine now, the original vector lengths are gone, zero
+  vectors need a special case, and appends need capacity management. The snapshot format moved to
+  version 2, which stores unit vectors; they are loaded back bit for bit, because renormalizing
+  could change the last bits and make a restored replica's graph drift from its twin's.
+  Version-1 snapshots still load (their vectors get normalized on load).
+- Knock-on effects on the other benchmarks:
+  - Threads went from 5x slower than sequential to ~1.5x slower. Context switches per query with
+    4 threads dropped from ~12,800 to ~270, since there are far fewer tiny numpy calls handing
+    the GIL around. That independently confirms the earlier GIL diagnosis.
+  - gRPC's ~0.3 ms per query is now about half of total latency, and on tiny shards gRPC is ~3x
+    slower than in-process. Making the compute faster made the transport matter more.
+  - fsync on every write now costs roughly 20% of write throughput (~3,100 → ~2,600 writes/s);
+    a 1.1 ms insert used to hide it. Speeding up one part exposed the next one.
+  - Log replay on restart and log-based resync got about 4x faster; snapshots still win for
+    resync at this shard size.
