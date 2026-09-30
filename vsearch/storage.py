@@ -21,7 +21,7 @@ import numpy as np
 from .cluster import Shard
 from .hnsw import HNSW
 
-SNAPSHOT_FORMAT = 1
+SNAPSHOT_FORMAT = 2   # 2: vectors stored at unit length; 1: vectors stored as inserted
 _HEADER = struct.Struct("<II")         # payload length, crc32
 _RECORD_START = struct.Struct("<QII")  # seq, count, dim
 
@@ -49,8 +49,7 @@ def save_snapshot(shard, last_seq, path):
     path = Path(path)
     index = shard.index
     arrays = {
-        "vectors": (np.stack(index.vectors).astype(np.float32) if index.vectors
-                    else np.zeros((0, 0), dtype=np.float32)),
+        "vectors": np.asarray(index.vectors, dtype=np.float32),
         "global_ids": np.asarray(shard.global_ids, dtype=np.int64),
     }
     # Each layer's adjacency lists, flattened: node ids, where each node's neighbors
@@ -94,13 +93,15 @@ def load_snapshot(path, ef_search=None):
     """
     with np.load(path, allow_pickle=False) as data:
         meta = json.loads(str(data["meta"]))
-        if meta["format"] != SNAPSHOT_FORMAT:
+        if meta["format"] not in (1, SNAPSHOT_FORMAT):
             raise ValueError(f"unsupported snapshot format {meta['format']}")
 
         index = HNSW(M=meta["M"], ef_construction=meta["ef_construction"],
                      ef_search=meta["ef_search"] if ef_search is None else ef_search)
         index.rng.bit_generator.state = meta["rng_state"]
-        index.vectors = list(data["vectors"])
+        # Format 2 already stores unit vectors: keep them bit for bit, so a restored replica
+        # keeps building exactly the same graph as its twin.
+        index.set_vectors(data["vectors"], normalized=meta["format"] == SNAPSHOT_FORMAT)
         for layer in range(meta["num_layers"]):
             nodes = data[f"layer{layer}_nodes"].tolist()
             offsets = data[f"layer{layer}_offsets"].tolist()

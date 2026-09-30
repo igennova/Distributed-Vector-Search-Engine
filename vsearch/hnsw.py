@@ -2,13 +2,25 @@
 HNSW (Hierarchical Navigable Small World) index.
 
 Graph representation:
-  self.vectors     : np.ndarray (n, dim)          -- the data
+  self._data       : np.ndarray (capacity, dim) float32 -- unit-length vectors, one row per
+                     node; only the first self._count rows are in use
   self.graph       : list; self.graph[layer] is {node_id: [neighbor_ids]}
   self.entry_point : node id where a search starts (top of the graph)
   self.top_layer   : highest layer index that exists
+
+Vectors are normalized once when inserted, so cosine distance is just 1 - dot product, and
+the distances from a query to a whole neighbor list come from one matrix-vector product.
+Internal search methods expect a normalized query; the public ones normalize it themselves.
 """
 import heapq
 import numpy as np
+
+_INITIAL_CAPACITY = 16
+
+
+def _normalize(vector):
+    norm = np.linalg.norm(vector)
+    return vector / norm if norm > 0 else vector   # a zero vector ends up at distance 1 from all
 
 
 class HNSW:
@@ -18,13 +30,52 @@ class HNSW:
         self.ef_search = ef_search
         self.mL = 1.0 / np.log(M)          # level-generation scale (exponential decay)
         self.rng = np.random.default_rng(seed)
-        self.vectors = []                  # grows one vector per insert
+        self._data = None                  # (capacity, dim) unit vectors, grown by doubling
+        self._count = 0
         self.graph = []                    # list of {node_id: [neighbor_ids]} per layer
         self.entry_point = None
         self.top_layer = -1
 
+    @property
+    def vectors(self):
+        """The stored vectors (unit length), one row per node."""
+        if self._data is None:
+            return np.zeros((0, 0), dtype=np.float32)
+        return self._data[:self._count]
+
+    @vectors.setter
+    def vectors(self, rows):
+        self.set_vectors(rows)
+
+    def set_vectors(self, rows, normalized=False):
+        """Replace the stored vectors. Pass normalized=True for rows that already have unit
+        length (e.g. read back from a snapshot), so they are kept bit for bit."""
+        rows = np.asarray(rows, dtype=np.float32)
+        if rows.size == 0:
+            self._data, self._count = None, 0
+            return
+        if not normalized:
+            norms = np.linalg.norm(rows, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            rows = rows / norms
+        self._data = np.array(rows, dtype=np.float32)
+        self._count = len(rows)
+
+    def _append(self, unit_vector):
+        """Store one vector and return its node id. Doubling the capacity when full keeps the
+        average cost of an append constant, like a Python list."""
+        if self._data is None:
+            self._data = np.empty((_INITIAL_CAPACITY, len(unit_vector)), dtype=np.float32)
+        elif self._count == len(self._data):
+            grown = np.empty((2 * len(self._data), self._data.shape[1]), dtype=np.float32)
+            grown[:self._count] = self._data[:self._count]
+            self._data = grown
+        self._data[self._count] = unit_vector
+        self._count += 1
+        return self._count - 1
+
     def _distance(self, a, b):
-        """Cosine distance: 0 = identical direction, larger = farther apart."""
+        """Cosine distance between any two vectors: 0 = same direction, larger = farther apart."""
         cos = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
         return 1.0 - cos
 
@@ -37,77 +88,78 @@ class HNSW:
         Used to descend the sparse upper layers and to seed the layer-0 search.
         """
         current = entry
-        current_dist = self._distance(query, self.vectors[current])
+        current_dist = 1.0 - float(self._data[current] @ query)
 
         while True:
-            best_neighbor = None
-            best_dist = current_dist
-
-            for neighbor in self.graph[layer][current]:
-                d = self._distance(query, self.vectors[neighbor])
-                if d < best_dist:
-                    best_neighbor, best_dist = neighbor, d
+            neighbors = self.graph[layer][current]
+            if not neighbors:
+                return current
+            dists = 1.0 - self._data[neighbors] @ query    # all neighbors in one product
+            best = int(np.argmin(dists))
 
             # No neighbor is closer than where we stand -> local minimum, stop.
-            if best_neighbor is None:
+            if dists[best] >= current_dist:
                 return current
 
-            current, current_dist = best_neighbor, best_dist
+            current, current_dist = neighbors[best], float(dists[best])
 
-    def _search_layer(self, query, entry, layer, ef):
+    def _search_layer_with_distances(self, query, entry, layer, ef):
         """
         Beam search within a single layer: explore from `entry`, always expanding the
         closest unexplored node, while keeping the `ef` closest nodes found so far.
         Keeping a set of candidates (rather than a single node) lets it explore around
-        local minima. Returns the ef closest node ids in this layer (unordered).
+        local minima. Returns the ef closest nodes as (distance, id) pairs (unordered).
 
         candidates : min-heap by distance      -> next node to expand is the closest one
         results    : max-heap stored as (-distance, id) -> the farthest kept node is on
                      top, so it is cheap to drop when the set exceeds ef
         """
-        d_entry = self._distance(query, self.vectors[entry])
+        d_entry = 1.0 - float(self._data[entry] @ query)
         visited = {entry}
         candidates = [(d_entry, entry)]
         results = [(-d_entry, entry)]
+        adjacency = self.graph[layer]
 
         while candidates:
             dist_c, c = heapq.heappop(candidates)
-            dist_farthest = -results[0][0]
 
             # The closest remaining candidate is farther than our worst kept result,
             # so nothing unexplored can improve the set.
-            if dist_c > dist_farthest:
+            if dist_c > -results[0][0]:
                 break
 
-            for neighbor in self.graph[layer][c]:
-                if neighbor in visited:
-                    continue
-                visited.add(neighbor)
-                d = self._distance(query, self.vectors[neighbor])
-                dist_farthest = -results[0][0]
+            fresh = [n for n in adjacency[c] if n not in visited]
+            if not fresh:
+                continue
+            visited.update(fresh)
+            dists = 1.0 - self._data[fresh] @ query        # one product per expanded node
 
-                if len(results) < ef or d < dist_farthest:
+            for neighbor, d in zip(fresh, dists.tolist()):
+                if len(results) < ef or d < -results[0][0]:
                     heapq.heappush(candidates, (d, neighbor))
                     heapq.heappush(results, (-d, neighbor))
                     if len(results) > ef:
                         heapq.heappop(results)
 
-        return [node_id for (_, node_id) in results]
+        return [(-neg_dist, node_id) for neg_dist, node_id in results]
+
+    def _search_layer(self, query, entry, layer, ef):
+        """Like _search_layer_with_distances, but returns only the node ids."""
+        return [node_id for _, node_id in self._search_layer_with_distances(query, entry, layer, ef)]
 
     def _random_level(self):
         """Draw a node's top layer. Exponentially decaying: most nodes get level 0."""
         return int(-np.log(self.rng.random()) * self.mL)
 
-    def _select_neighbors(self, base_vector, candidate_ids, m):
-        """Pick the m candidates closest to base_vector."""
-        ordered = sorted(candidate_ids, key=lambda n: self._distance(base_vector, self.vectors[n]))
-        return ordered[:m]
+    def _closest(self, base, candidate_ids, m):
+        """Pick the m candidates closest to the unit vector `base` (ties keep their order)."""
+        dists = 1.0 - self._data[candidate_ids] @ base
+        return [candidate_ids[i] for i in np.argsort(dists, kind="stable")[:m]]
 
     def insert(self, vector):
         """Add one vector to the index, wiring it into the graph at every layer it occupies."""
-        vector = np.asarray(vector, dtype=np.float32)
-        node_id = len(self.vectors)
-        self.vectors.append(vector)
+        unit = _normalize(np.asarray(vector, dtype=np.float32))
+        node_id = self._append(unit)
         level = self._random_level()
 
         # Make sure the graph has enough layers, and register this node (no links yet).
@@ -125,12 +177,13 @@ class HNSW:
         # Phase A — descend the layers above this node's level, navigation only.
         entry = self.entry_point
         for layer in range(self.top_layer, level, -1):
-            entry = self._greedy_descend(vector, entry, layer)
+            entry = self._greedy_descend(unit, entry, layer)
 
         # Phase B — from this node's level down to 0, find neighbors and connect.
         for layer in range(min(level, self.top_layer), -1, -1):
-            candidates = self._search_layer(vector, entry, layer, self.ef_construction)
-            neighbors = self._select_neighbors(vector, candidates, self.M)
+            scored = self._search_layer_with_distances(unit, entry, layer, self.ef_construction)
+            scored.sort(key=lambda pair: pair[0])           # the search already has the distances
+            neighbors = [node_id for _, node_id in scored[:self.M]]
             max_conn = self.M * 2 if layer == 0 else self.M   # layer 0 gets a higher cap
 
             for n in neighbors:
@@ -138,10 +191,10 @@ class HNSW:
                 self.graph[layer][n].append(node_id)
                 # Keep neighbor degree bounded so search stays cheap.
                 if len(self.graph[layer][n]) > max_conn:
-                    self.graph[layer][n] = self._select_neighbors(
-                        self.vectors[n], self.graph[layer][n], max_conn)
+                    self.graph[layer][n] = self._closest(self._data[n], self.graph[layer][n],
+                                                         max_conn)
 
-            entry = min(candidates, key=lambda n: self._distance(vector, self.vectors[n]))
+            entry = scored[0][1]
 
         # A taller-than-current node becomes the new entry point.
         if level > self.top_layer:
@@ -158,13 +211,12 @@ class HNSW:
         """Return the approximate k nearest neighbors as (distance, id) pairs, closest first."""
         if self.entry_point is None:                      # empty index
             return []
-        query = np.asarray(query, dtype=np.float32)
+        query = _normalize(np.asarray(query, dtype=np.float32))
         entry = self.entry_point
         for layer in range(self.top_layer, 0, -1):        # descend the sparse upper layers
             entry = self._greedy_descend(query, entry, layer)
-        candidates = self._search_layer(query, entry, 0, self.ef_search)
-        scored = sorted((self._distance(query, self.vectors[n]), n) for n in candidates)
-        return scored[:k]
+        scored = self._search_layer_with_distances(query, entry, 0, self.ef_search)
+        return sorted(scored)[:k]
 
     def search(self, query, k=10):
         """Return the ids of the approximate k nearest neighbors of query."""
