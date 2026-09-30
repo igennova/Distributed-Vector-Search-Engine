@@ -14,6 +14,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import NamedTuple
 
 import grpc
 import numpy as np
@@ -34,6 +35,29 @@ class ShardUnavailableError(RuntimeError):
     def __init__(self, shards):
         super().__init__(f"no replica answered for shard(s) {shards}")
         self.shards = shards
+
+
+class ReplicasOutOfSyncError(RuntimeError):
+    """The replicas of a shard have applied different numbers of writes. Run repair() first."""
+
+    def __init__(self, shard, last_seqs):
+        super().__init__(f"replicas of shard {shard} are out of sync (last seq by replica: "
+                         f"{last_seqs}); run repair() before writing")
+        self.shard = shard
+        self.last_seqs = last_seqs
+
+
+class ReplicaSync(NamedTuple):
+    """One replica that repair() brought up to date."""
+    shard: int
+    replica: str          # address of the replica that caught up
+    source: str           # address it copied from
+    method: str           # "log" or "snapshot"
+    records_applied: int  # log records applied (after the snapshot, if one was copied)
+    last_seq: int
+
+
+_UNCHECKED = -1   # in-memory shards don't number their writes, so their order isn't checked
 
 
 class _Replica:
@@ -60,11 +84,13 @@ class GrpcCoordinator:
         self.shard_sizes = [0] * len(self.replicas)   # as reported back by the servers
         self.failovers = 0                            # searches retried on another replica
         self._next_replica = [0] * len(self.replicas) # round-robin position per shard
+        self._last_seqs = [None] * len(self.replicas) # per shard: last write all replicas agree on
 
     def add(self, vectors):
         vectors = np.asarray(vectors, dtype=np.float32)
         if len(vectors) == 0:
             return self
+        self._check_seqs()
         dim = vectors.shape[1]
         per_request = max(1, MAX_ADD_BYTES // (dim * vectors.itemsize))
         batches = route_round_robin(vectors, len(self.replicas), start_id=self.size)
@@ -82,19 +108,79 @@ class GrpcCoordinator:
                 if not chunk_ids:
                     continue
                 chunk = np.asarray(vecs[start:start + per_request], dtype=np.float32)
+                # Durable replicas only accept the exact next seq, so this chunk gets the same
+                # number on every replica of the shard.
+                seq = 0 if self._last_seqs[shard] == _UNCHECKED else self._last_seqs[shard] + 1
                 request = shard_pb2.AddRequest(global_ids=chunk_ids, dim=dim,
-                                               values=chunk.ravel().tolist())
+                                               values=chunk.ravel().tolist(), seq=seq)
                 for replica in self.replicas[shard]:
                     calls.append((shard, replica.stub.Add.future(request, timeout=self.add_timeout)))
 
             reported = {}
-            for shard, call in calls:
-                reported.setdefault(shard, set()).add(call.result().size)
+            try:
+                for shard, call in calls:
+                    reported.setdefault(shard, set()).add(call.result().size)
+            except grpc.RpcError:
+                # Some replicas may have applied this chunk and others not. Forget what we
+                # knew, so the next write re-checks every shard before sending anything.
+                self._last_seqs = [None] * len(self.replicas)
+                raise
             for shard, sizes in reported.items():
                 if len(sizes) > 1:
                     raise RuntimeError(f"replicas of shard {shard} diverged: sizes {sorted(sizes)}")
                 self.shard_sizes[shard] = sizes.pop()
+                if self._last_seqs[shard] != _UNCHECKED:
+                    self._last_seqs[shard] += 1
         return self
+
+    def _check_seqs(self):
+        """Learn each shard's last write seq. Its replicas must agree on it before new writes,
+        otherwise a write would land on top of different histories."""
+        for shard, group in enumerate(self.replicas):
+            if self._last_seqs[shard] is not None:
+                continue
+            statuses = [replica.stub.Status(shard_pb2.StatusRequest(), timeout=self.timeout)
+                        for replica in group]
+            if not all(status.durable for status in statuses):
+                self._last_seqs[shard] = _UNCHECKED
+                continue
+            seqs = {replica.address: status.last_seq for replica, status in zip(group, statuses)}
+            if len(set(seqs.values())) > 1:
+                raise ReplicasOutOfSyncError(shard, seqs)
+            self._last_seqs[shard] = next(iter(seqs.values()))
+
+    def repair(self):
+        """Bring every replica up to date with the most advanced copy of its shard.
+
+        A replica that is behind copies the missing writes straight from that copy: from its
+        log, or from its snapshot when the log no longer reaches back far enough. A write that
+        failed on some replicas but landed on others therefore ends up applied on all of them
+        (repair rolls forward). Unreachable replicas are skipped. Needs durable shards.
+        Returns a ReplicaSync for each replica that caught up.
+        """
+        synced = []
+        for shard, group in enumerate(self.replicas):
+            statuses = []
+            for replica in group:
+                try:
+                    statuses.append((replica, replica.stub.Status(shard_pb2.StatusRequest(),
+                                                                  timeout=self.timeout)))
+                except grpc.RpcError as err:
+                    if err.code() not in RETRYABLE:
+                        raise
+            if not statuses:
+                continue
+            source, newest = max(statuses, key=lambda item: item[1].last_seq)
+            for replica, status in statuses:
+                if status.last_seq < newest.last_seq:
+                    result = replica.stub.SyncFrom(
+                        shard_pb2.SyncFromRequest(peer=source.address), timeout=self.add_timeout)
+                    synced.append(ReplicaSync(shard, replica.address, source.address,
+                                              result.method, result.records_applied,
+                                              result.last_seq))
+            self.shard_sizes[shard] = newest.size
+        self._last_seqs = [None] * len(self.replicas)   # re-check before the next write
+        return synced
 
     def search(self, query, k=10):
         """Global top-k ids. Raises ShardUnavailableError if any shard has no live replica."""
