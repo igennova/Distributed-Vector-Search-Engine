@@ -29,7 +29,7 @@ pip install -r requirements.txt
 
 ```
 vsearch/            the engine
-  dataset.py          synthetic data + exact ground truth
+  dataset.py          synthetic data, GloVe loader, exact ground truth
   brute_force.py      exact search (baseline)
   hnsw.py             HNSW index
   cluster.py          shards, per-shard worker processes, scatter-gather coordinator
@@ -55,7 +55,12 @@ python -m benchmarks.bench_grpc          # shards over local pipes vs over gRPC
 python -m benchmarks.bench_replication   # 1 vs 2 replicas, and a server crash mid-run
 python -m benchmarks.bench_persistence   # fsync cost, and restart from log vs snapshot
 python -m benchmarks.bench_resync        # catching up a replica: from the log vs a snapshot
+python -m benchmarks.bench_glove         # real word vectors (needs the GloVe download, below)
 ```
+
+The GloVe benchmark needs Stanford's GloVe 6B vectors: download `glove.6B.zip` (862 MB) from
+https://nlp.stanford.edu/projects/glove/ into `data/`. The first run caches the 100-dimension
+vectors as a `.npy` file, after which the zip can be deleted.
 
 ### Running shards as network services
 
@@ -118,20 +123,71 @@ with GrpcCoordinator(shards) as coord:
 
 ## Benchmarks
 
-Measured on a MacBook with a synthetic dataset (10,000 vectors, dim 128, k=10). Laptop timings
-vary from run to run, so they are rounded or given as ranges over repeated runs.
+Measured on a MacBook. Laptop timings vary from run to run, so they are rounded.
 
-| Method               | recall@10 | p50 latency | QPS    |
-|----------------------|-----------|-------------|--------|
-| Brute force (exact)  | 1.000     | ~13 ms      | ~70    |
-| HNSW, ef_search=50   | 0.564     | ~0.4 ms     | ~2,300 |
-| HNSW, ef_search=200  | 0.930     | ~1.2 ms     | ~800   |
-| HNSW, ef_search=400  | 0.987     | ~2.0 ms     | ~450   |
+### Real data: GloVe word vectors
 
-`ef_search` trades recall for latency at query time with no rebuild. At 0.93 recall HNSW is about
-10x faster than exact search on 10k vectors, and the gap grows with the dataset because exact
-search is linear. (The dataset is random Gaussian, a worst case for ANN; real clustered
-embeddings reach high recall at lower `ef`.) Run it with `python -m benchmarks.bench_hnsw`.
+Stanford GloVe 6B (400,000 words, 100 dims), indexed most-frequent-first and queried with 1,000
+words held out of the index. The exact baseline is one numpy matrix-vector product per query.
+
+| Vectors | Method                  | recall@10 | p50 latency | QPS     |
+|---------|-------------------------|-----------|-------------|---------|
+| 10,000  | exact (numpy)           | 1.000     | ~0.09 ms    | ~12,000 |
+| 10,000  | HNSW, ef_search=100     | 0.883     | ~0.34 ms    | ~2,900  |
+| 100,000 | exact (numpy)           | 1.000     | ~1.05 ms    | ~900    |
+| 100,000 | HNSW, ef_search=100     | 0.868     | ~0.53 ms    | ~2,000  |
+| 100,000 | 4 shards, ef_search=100 | 0.964     | ~0.70 ms    | ~1,200  |
+| 400,000 | exact (numpy)           | 1.000     | ~3.96 ms    | ~250    |
+| 400,000 | HNSW, ef_search=50      | 0.848     | ~0.35 ms    | ~2,700  |
+| 400,000 | HNSW, ef_search=100     | 0.912     | ~0.65 ms    | ~1,500  |
+| 400,000 | HNSW, ef_search=200     | 0.949     | ~1.14 ms    | ~890    |
+| 400,000 | 4 shards, ef_search=100 | 0.960     | ~0.73 ms    | ~1,260  |
+
+- Exact search is linear in the data: 0.09 → 1.05 → 3.96 ms as the index grows 40x. HNSW at
+  `ef_search=100` goes 0.34 → 0.53 → 0.65 ms, less than 2x.
+- At 10k vectors exact search wins outright: one BLAS call is cheaper than walking a graph in
+  Python. The crossover is between 10k and 100k; at 400k HNSW is 3.5–11x faster at 0.95–0.85
+  recall.
+- This index is pure Python and the baseline's inner loop is compiled BLAS. A compiled HNSW such
+  as hnswlib is far faster than this one; what carries over is how the two scale.
+- Recall is not comparable across sizes: the index holds the n most frequent words, so the mix
+  of words changes with n.
+- Building 400k vectors takes ~264 s as one index and ~75 s as 4 shard processes. The index uses
+  about 88 MB per 100k vectors (351 MB at 400k).
+
+Run it with `python -m benchmarks.bench_glove` (10k and 100k) or
+`python -m benchmarks.bench_glove 400000`.
+
+Choosing each node's links (100k GloVe vectors, same parameters):
+
+| Neighbor selection                  | recall@10 at ef 50 / 100 / 200 | build | links per node |
+|-------------------------------------|--------------------------------|-------|----------------|
+| M closest candidates                | 0.727 / 0.813 / 0.879          | ~56 s | 25.8           |
+| Diversity heuristic + fill          | 0.797 / 0.870 / 0.921          | ~69 s | 27.2           |
+| Diversity heuristic (the default)   | 0.791 / 0.868 / 0.919          | ~57 s | 21.6           |
+
+Real data is clumpy, so a node's M closest candidates tend to sit in one cluster and its links
+all point the same way. The heuristic from the HNSW paper keeps a candidate only if it is closer
+to the node than to any neighbor already kept, which spends links on different directions: 4–6
+points more recall for the same build and search cost, with fewer links. Filling the unused
+slots with rejected candidates cost 20% more build time for almost no recall, so it is off. On
+the random synthetic data below, which has no clusters, the heuristic changes recall by about a
+point.
+
+### Synthetic data
+
+10,000 random Gaussian vectors, dim 128, k=10. Random vectors are a worst case for ANN.
+
+| Method                    | recall@10 | p50 latency | QPS    |
+|---------------------------|-----------|-------------|--------|
+| Brute force (Python loop) | 1.000     | ~13 ms      | ~75    |
+| HNSW, ef_search=50        | 0.555     | ~0.3 ms     | ~3,000 |
+| HNSW, ef_search=200       | 0.926     | ~1.0 ms     | ~1,000 |
+| HNSW, ef_search=400       | 0.980     | ~1.8 ms     | ~550   |
+
+`ef_search` trades recall for latency at query time with no rebuild. The brute-force row is a
+plain Python loop over every vector, which is a weak baseline; see the GloVe table above for a
+comparison against vectorized exact search. Run it with `python -m benchmarks.bench_hnsw`.
 
 ### Making the index fast
 
@@ -146,38 +202,39 @@ list come from a single matrix-vector product.
 | Before                    | ~42 s     | ~5.2 ms     | 0.930     |
 | After                     | ~9–14 s   | ~1.0–1.3 ms | 0.930     |
 
-Same algorithm, same recall. What's left is the Python beam-search loop itself (heap operations
-and bookkeeping); going much further would take compiled code.
+Same algorithm, same recall (measured before the neighbor-selection change above). What's left
+is the Python beam-search loop itself (heap operations and bookkeeping); going much further would
+take compiled code.
 
 ### Sharding and fan-out
 
-Sharded search (same data, ef_search=50, shards queried sequentially):
+Sharded search (synthetic data, ef_search=50, shards queried sequentially):
 
 | Shards | recall@10 | p50 latency | build time |
 |--------|-----------|-------------|------------|
-| 1      | 0.554     | ~0.3 ms     | ~5.4 s     |
-| 2      | 0.701     | ~0.6 ms     | ~4.9 s     |
-| 4      | 0.876     | ~1.1 ms     | ~4.2 s     |
+| 1      | 0.561     | ~0.3 ms     | ~5.8 s     |
+| 2      | 0.713     | ~0.6 ms     | ~4.9 s     |
+| 4      | 0.883     | ~1.0 ms     | ~4.0 s     |
 
 More shards raise recall and cut build time, but add total query work; latency only drops once
 shards are queried in parallel. Run it with `python -m benchmarks.bench_cluster`.
 
 Parallel fan-out (4 shards, same data and parameters):
 
-| Fan-out                        | recall@10 | p50 latency  | build time |
-|--------------------------------|-----------|--------------|------------|
-| Sequential                     | 0.876     | ~1.2–1.3 ms  | ~4 s       |
-| Threads                        | 0.876     | ~1.8 ms      | ~4 s       |
-| Processes (one worker/shard)   | 0.876     | ~0.4–0.55 ms | ~1.4 s     |
+| Fan-out                        | recall@10 | p50 latency | build time |
+|--------------------------------|-----------|-------------|------------|
+| Sequential                     | 0.883     | ~1.0 ms     | ~4 s       |
+| Threads                        | 0.883     | ~1.8 ms     | ~4 s       |
+| Processes (one worker/shard)   | 0.883     | ~0.34 ms    | ~1.1 s     |
 
 Each worker process owns its shard's index, so only the query and its k results cross process
 boundaries. Threads are slower than sequential because search is CPU-bound Python and the GIL
 lets one thread run at a time. Before distances were batched, the effect was dramatic: every
 search made thousands of tiny numpy calls that release and reacquire the GIL, 4 threads caused
 ~12,800 context switches per query, and threads were 5x slower than sequential. With batched
-distances that fell to ~270 context switches per query, and threads are ~1.5x slower: still no
-gain. On tiny shards (200 vectors) processes and sequential now come out about even, since there
-is little work per shard left to spread out. Run it with `python -m benchmarks.bench_parallel`.
+distances that fell to ~270 context switches per query, and threads are ~1.5–1.7x slower: still
+no gain. On tiny shards (200 vectors) the gain from processes shrinks, since there is little
+work per shard left to spread out. Run it with `python -m benchmarks.bench_parallel`.
 
 ### Over the network
 
@@ -185,11 +242,11 @@ Shards as gRPC services (4 shard servers as separate processes, same data and pa
 
 | Transport              | 10k vectors: p50 | tiny shards (200 vectors): p50 |
 |------------------------|------------------|--------------------------------|
-| In-process, sequential | ~1.0 ms          | ~0.19 ms                       |
-| Processes over pipes   | ~0.34 ms         | ~0.12 ms                       |
-| gRPC servers           | ~0.66 ms         | ~0.54 ms                       |
+| In-process, sequential | ~1.0 ms          | ~0.20 ms                       |
+| Processes over pipes   | ~0.33 ms         | ~0.11 ms                       |
+| gRPC servers           | ~0.65 ms         | ~0.54 ms                       |
 
-Recall is identical across transports (0.876 on 10k). gRPC adds roughly 0.3 ms per query over
+Recall is identical across transports (0.883 on 10k). gRPC adds roughly 0.3 ms per query over
 local pipes (protobuf encoding, HTTP/2, and the Python gRPC stack). Now that a shard search takes
 a few tenths of a millisecond, that hop is about half of each query's latency, and on tiny shards
 it makes gRPC about 3x slower than searching in-process. Run it with
@@ -199,15 +256,15 @@ Replication (4 shards over gRPC):
 
 | Replicas | Servers | recall@10 | p50 latency | build time |
 |----------|---------|-----------|-------------|------------|
-| 1        | 4       | 0.876     | ~0.7 ms     | ~1.1 s     |
-| 2        | 8       | 0.876     | ~0.7 ms     | ~1.7 s     |
+| 1        | 4       | 0.883     | ~0.7 ms     | ~1.1 s     |
+| 2        | 8       | 0.883     | ~0.7 ms     | ~1.6 s     |
 
 A search still reads one copy per shard, so a second replica adds no measurable latency. Writes go
 to both copies, so building takes about 1.5x longer with twice the servers.
 
 Crash test: with 2 replicas, one server is killed (SIGKILL) halfway through 100 queries. All 100
-queries were answered with unchanged recall (0.876), with one failover to the other copy; the
-slowest query after the crash took ~1.3 ms. After that first failure the dead server was tried
+queries were answered with unchanged recall (0.883), with one failover to the other copy; the
+slowest query after the crash took ~1.2 ms. After that first failure the dead server was tried
 last, so later queries went straight to its replica. Run it with
 `python -m benchmarks.bench_replication`.
 
@@ -218,29 +275,30 @@ Persistence (one shard of 2,500 vectors, dim 128, on a MacBook SSD):
 | Log append, no index work      | per append   |
 |--------------------------------|--------------|
 | No fsync                       | ~2 µs        |
-| `fsync`                        | ~22–25 µs    |
-| `F_FULLFSYNC` (macOS)          | ~3.4–3.6 ms  |
+| `fsync`                        | ~22 µs       |
+| `F_FULLFSYNC` (macOS)          | ~3.4 ms      |
 
 | Restart of the shard           | time       |
 |--------------------------------|------------|
-| Replay the whole log (1.3 MB)  | ~1.1 s     |
-| Load a snapshot (1.9 MB)       | ~4 ms      |
+| Replay the whole log (1.3 MB)  | ~1.0 s     |
+| Load a snapshot (1.9 MB)       | ~3 ms      |
 
-With inserts now around 0.3 ms, an fsync on every write shows up in write throughput: ~3,100
-writes/s in memory against ~2,600/s with fsync, roughly 20% fewer. (Before the index got faster,
-a ~1.1 ms insert hid the fsync completely.) Replaying the log means re-inserting every vector,
-while a snapshot loads the finished graph, which is why periodic snapshots matter. On macOS, plain
-`fsync` does not flush the drive's own cache; only `F_FULLFSYNC` does, at about 150x the cost.
-Run it with `python -m benchmarks.bench_persistence`.
+An fsync per write (~22 µs) is small next to an insert (~0.33 ms), about 7% on paper. Over seven
+interleaved runs, writing through the log with or without fsync could not be told apart from
+in-memory writes (medians within a few percent, while each mode alone varied by more than that).
+Replaying the log means re-inserting every vector, while a snapshot loads the finished graph,
+which is why periodic snapshots matter. On macOS, plain `fsync` does not flush the drive's own
+cache; only `F_FULLFSYNC` does, at about 150x the cost. Run it with
+`python -m benchmarks.bench_persistence`.
 
 Replica resync (a replica of a 2,500-vector shard catching up from its twin over gRPC, localhost):
 
-| Replica missed          | Method   | Time        |
-|-------------------------|----------|-------------|
-| 50 vectors              | log      | ~0.04 s     |
-| 500 vectors             | log      | ~0.3–0.6 s  |
-| 2,000 vectors           | log      | ~1.0 s      |
-| everything (empty disk) | snapshot | ~0.01 s     |
+| Replica missed          | Method   | Time      |
+|-------------------------|----------|-----------|
+| 50 vectors              | log      | ~0.03 s   |
+| 500 vectors             | log      | ~0.3 s    |
+| 2,000 vectors           | log      | ~0.9 s    |
+| everything (empty disk) | snapshot | ~0.01 s   |
 
 Catching up from the log means re-inserting every missed vector into the HNSW graph (~0.5 ms
 each), so its cost grows with the gap. Copying a snapshot ships the finished graph (1.9 MB
@@ -258,7 +316,9 @@ log. Run it with `python -m benchmarks.bench_resync`.
 - [x] Replication: write to every replica, read from one, fail over when a server dies
 - [x] Durability: snapshots + write-ahead log; a restarted server recovers its data
 - [x] Replica resync: a replica that missed writes or lost its disk catches up from its twin
-- [ ] Benchmarks across growing dataset sizes
+- [x] Real-data benchmarks: GloVe word vectors up to 400k, diversity heuristic for links
+- [ ] Command-line interface
+- [ ] Retrieval layer for AI agents: text ingestion, payloads, metadata filtering
 - [ ] Docker / Kubernetes deployment
 
 ## Design notes

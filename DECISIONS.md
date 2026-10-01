@@ -227,7 +227,55 @@
     the GIL around. That independently confirms the earlier GIL diagnosis.
   - gRPC's ~0.3 ms per query is now about half of total latency, and on tiny shards gRPC is ~3x
     slower than in-process. Making the compute faster made the transport matter more.
-  - fsync on every write now costs roughly 20% of write throughput (~3,100 → ~2,600 writes/s);
-    a 1.1 ms insert used to hide it. Speeding up one part exposed the next one.
+  - Correction: I first wrote here that fsync on every write now cost roughly 20% of write
+    throughput, from a single run (~3,100 vs ~2,600 writes/s). The next run showed no gap, and
+    seven interleaved runs put the three modes within a few percent of each other while each
+    mode alone ranged far wider (in-memory: 1,363 to 3,252 writes/s). A 22 µs fsync against a
+    ~0.33 ms insert should cost about 7%, which this machine's noise hides. The 20% was noise.
   - Log replay on restart and log-based resync got about 4x faster; snapshots still win for
     resync at this shard size.
+## Real data: GloVe word vectors
+- Everything so far ran on 10k random vectors: small, a worst case for ANN, and comparable to
+  nothing. Switched to Stanford GloVe 6B (400,000 words, 100 dims). It ships with the words,
+  unlike the ann-benchmarks copy of GloVe, so results can be checked by eye ("king" → prince,
+  queen, monarch) and it can back a word-similarity demo.
+- Queries are 1,000 random words held out of the index, the same ones at every size. The index
+  holds the n most frequent of the remaining words, so recall is not comparable across sizes.
+  Ground truth for each size is computed by exact search over that subset.
+- The baseline is exact search as one numpy matrix-vector product per query. The earlier
+  brute-force baseline was a Python loop, and against it I had written that HNSW was "about 10x
+  faster than exact search" at 10k vectors. Against the vectorized baseline that is false: at
+  10k, exact search takes 0.09 ms and beats HNSW (0.19–0.64 ms). The README was corrected.
+- What does hold is the scaling. From 10k to 400k vectors exact search goes 0.09 → 1.05 →
+  3.96 ms (linear), HNSW at ef=100 goes 0.34 → 0.53 → 0.65 ms. At 400k: 0.848 recall at 0.35 ms
+  (11x faster than exact), 0.912 at 0.65 ms (6x), 0.949 at 1.14 ms (3.5x).
+- It is an uneven comparison in the baseline's favor: its inner loop is compiled BLAS, this
+  HNSW is interpreted Python. A compiled HNSW would widen the gap a lot.
+- Sharding on real data: 4 shard processes at ef=100 reach 0.960 recall at 0.73 ms on 400k
+  (one index: 0.912 at 0.65 ms), and build in 75 s instead of 264 s.
+- Memory: ~88 MB per 100k vectors (40 MB of vectors, the rest Python dicts and lists for the
+  graph), 351 MB at 400k. Storing the graph in numpy arrays would cut that; not needed yet.
+- These are single-run numbers on a laptop.
+
+## Neighbor selection: diversity heuristic
+- With "link to the M closest candidates", recall on GloVe was 0.727 / 0.813 / 0.879 at
+  ef 50 / 100 / 200 (100k vectors). Real data is clustered, so the M closest candidates of a
+  node are usually near each other and its links all lead into the same cluster.
+- The heuristic from the HNSW paper (Algorithm 4) walks the candidates from nearest to farthest
+  and keeps one only if it is closer to the node than to every neighbor already kept. A rejected
+  candidate is reachable through a kept one, so the slot goes to a different direction.
+- Measured three variants on the same 100k vectors and queries:
+  closest 0.727 / 0.813 / 0.879, build 56 s, 25.8 links per node;
+  heuristic + filling unused slots with rejected candidates 0.797 / 0.870 / 0.921, 69 s, 27.2;
+  heuristic without filling 0.791 / 0.868 / 0.919, 57 s, 21.6.
+- Chose the heuristic without filling. I had assumed filling would help by keeping every node
+  at full degree; it added 20% build time and slower searches for at most 0.6 points of recall.
+  Not filling is also what hnswlib does.
+- At 400k vectors the heuristic gives 0.848 / 0.912 / 0.949 against 0.817 / 0.877 / 0.924 for
+  closest.
+- On the random synthetic data the heuristic moves recall by about a point (0.926 vs 0.930 at
+  ef=200 on one index): with no clusters there is nothing to diversify, and fewer links cost a
+  little.
+- The rule is a setting (`neighbor_selection`) stored in snapshots, so a restored replica keeps
+  building its graph the same way as its twin. Snapshots written before the setting existed
+  load as "closest".
