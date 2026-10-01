@@ -1,5 +1,6 @@
 """Tests for HNSW: the graph-search primitives on a hand-built graph, and a built index's recall."""
 import numpy as np
+import pytest
 from vsearch.hnsw import HNSW
 
 # Six points fanned out by angle in 2D, connected as a chain (each node linked to its
@@ -66,3 +67,35 @@ def test_built_index_has_high_recall():
         total += 10
     recall = hits / total
     assert recall > 0.85, f"recall too low: {recall:.3f}"
+
+
+def _fan(*degrees):
+    """Unit vectors in 2D at the given angles; the base node (id 0) sits at 0 degrees."""
+    h = HNSW()
+    h.vectors = np.array([[np.cos(np.radians(d)), np.sin(np.radians(d))] for d in (0, *degrees)],
+                         dtype=np.float32)
+    ids = list(range(1, len(degrees) + 1))
+    return h, ids, 1.0 - h.vectors[ids] @ h.vectors[0]
+
+
+def test_heuristic_prefers_neighbors_in_different_directions():
+    # Candidates at 10 and 12 degrees are almost the same direction; -40 degrees is not.
+    h, ids, dists = _fan(10, 12, -40)
+
+    h.neighbor_selection = "closest"
+    assert h._select_neighbors(ids, dists, 2) == [1, 2]      # the two nearest, side by side
+
+    h.neighbor_selection = "heuristic"
+    assert h._select_neighbors(ids, dists, 2) == [1, 3]      # 12 deg is reachable via 10 deg
+
+
+def test_heuristic_may_use_fewer_slots_than_allowed():
+    h, ids, dists = _fan(10, 12, -40)
+    assert h._select_neighbors(ids, dists, 3) == [1, 2, 3]   # no more candidates than slots: keep all
+    h, ids, dists = _fan(10, 12, 14, -40)
+    assert h._select_neighbors(ids, dists, 3) == [1, 4]      # 12 and 14 deg are redundant: left out
+
+
+def test_unknown_neighbor_selection_is_rejected():
+    with pytest.raises(ValueError):
+        HNSW(neighbor_selection="random")

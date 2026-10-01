@@ -67,6 +67,7 @@ def save_snapshot(shard, last_seq, path):
         "M": index.M,
         "ef_construction": index.ef_construction,
         "ef_search": index.ef_search,
+        "neighbor_selection": index.neighbor_selection,
         "entry_point": index.entry_point,
         "top_layer": index.top_layer,
         "num_layers": len(index.graph),
@@ -97,7 +98,9 @@ def load_snapshot(path, ef_search=None):
             raise ValueError(f"unsupported snapshot format {meta['format']}")
 
         index = HNSW(M=meta["M"], ef_construction=meta["ef_construction"],
-                     ef_search=meta["ef_search"] if ef_search is None else ef_search)
+                     ef_search=meta["ef_search"] if ef_search is None else ef_search,
+                     # snapshots written before this setting existed used "closest"
+                     neighbor_selection=meta.get("neighbor_selection", "closest"))
         index.rng.bit_generator.state = meta["rng_state"]
         # Format 2 already stores unit vectors: keep them bit for bit, so a restored replica
         # keeps building exactly the same graph as its twin.

@@ -16,6 +16,7 @@ import heapq
 import numpy as np
 
 _INITIAL_CAPACITY = 16
+NEIGHBOR_SELECTION = ("heuristic", "closest")
 
 
 def _normalize(vector):
@@ -24,10 +25,14 @@ def _normalize(vector):
 
 
 class HNSW:
-    def __init__(self, M=16, ef_construction=200, ef_search=50, seed=None):
+    def __init__(self, M=16, ef_construction=200, ef_search=50, seed=None,
+                 neighbor_selection="heuristic"):
+        if neighbor_selection not in NEIGHBOR_SELECTION:
+            raise ValueError(f"neighbor_selection must be one of {NEIGHBOR_SELECTION}")
         self.M = M
         self.ef_construction = ef_construction
         self.ef_search = ef_search
+        self.neighbor_selection = neighbor_selection
         self.mL = 1.0 / np.log(M)          # level-generation scale (exponential decay)
         self.rng = np.random.default_rng(seed)
         self._data = None                  # (capacity, dim) unit vectors, grown by doubling
@@ -151,10 +156,34 @@ class HNSW:
         """Draw a node's top layer. Exponentially decaying: most nodes get level 0."""
         return int(-np.log(self.rng.random()) * self.mL)
 
-    def _closest(self, base, candidate_ids, m):
-        """Pick the m candidates closest to the unit vector `base` (ties keep their order)."""
-        dists = 1.0 - self._data[candidate_ids] @ base
-        return [candidate_ids[i] for i in np.argsort(dists, kind="stable")[:m]]
+    def _select_neighbors(self, candidate_ids, dists, m):
+        """Pick up to m of the candidates as neighbors of a base node; `dists` holds each
+        candidate's distance to that node.
+
+        "closest" keeps the m nearest. "heuristic" (HNSW paper, Algorithm 4) goes from nearest
+        to farthest and keeps a candidate only if it is closer to the base node than to every
+        neighbor kept so far. A rejected candidate can be reached through a kept neighbor
+        anyway, so its slot goes to a link pointing somewhere new; that keeps clusters
+        connected to each other instead of only to themselves. It may return fewer than m:
+        filling the leftover slots with rejected candidates measured as slower to build and
+        search for almost no recall.
+        """
+        order = np.argsort(dists, kind="stable")
+        if len(order) <= m or self.neighbor_selection == "closest":
+            return [candidate_ids[i] for i in order[:m]]
+
+        ids = [candidate_ids[i] for i in order]
+        vectors = self._data[ids]
+        between = 1.0 - vectors @ vectors.T            # candidate-to-candidate distances
+        nearest_kept = np.full(len(ids), np.inf, dtype=np.float32)
+        kept = []
+        for i, to_base in enumerate(dists[order].tolist()):
+            if to_base < nearest_kept[i]:
+                kept.append(ids[i])
+                if len(kept) == m:
+                    break
+                np.minimum(nearest_kept, between[i], out=nearest_kept)
+        return kept
 
     def insert(self, vector):
         """Add one vector to the index, wiring it into the graph at every layer it occupies."""
@@ -183,16 +212,19 @@ class HNSW:
         for layer in range(min(level, self.top_layer), -1, -1):
             scored = self._search_layer_with_distances(unit, entry, layer, self.ef_construction)
             scored.sort(key=lambda pair: pair[0])           # the search already has the distances
-            neighbors = [node_id for _, node_id in scored[:self.M]]
+            neighbors = self._select_neighbors(
+                [candidate for _, candidate in scored],
+                np.array([dist for dist, _ in scored], dtype=np.float32), self.M)
             max_conn = self.M * 2 if layer == 0 else self.M   # layer 0 gets a higher cap
 
             for n in neighbors:
                 self.graph[layer][node_id].append(n)
-                self.graph[layer][n].append(node_id)
+                links = self.graph[layer][n]
+                links.append(node_id)
                 # Keep neighbor degree bounded so search stays cheap.
-                if len(self.graph[layer][n]) > max_conn:
-                    self.graph[layer][n] = self._closest(self._data[n], self.graph[layer][n],
-                                                         max_conn)
+                if len(links) > max_conn:
+                    self.graph[layer][n] = self._select_neighbors(
+                        links, 1.0 - self._data[links] @ self._data[n], max_conn)
 
             entry = scored[0][1]
 

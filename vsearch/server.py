@@ -159,6 +159,8 @@ def main():
     parser.add_argument("--ef-construction", type=int, default=100)
     parser.add_argument("--ef-search", type=int, default=50)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--neighbor-selection", choices=["heuristic", "closest"],
+                        default="heuristic", help="how the graph picks each node's links")
     parser.add_argument("--data-dir", default=None,
                         help="keep a snapshot + write-ahead log here; without it, data lives in memory only")
     parser.add_argument("--fsync", choices=["always", "off"], default="always",
@@ -169,7 +171,8 @@ def main():
 
     shard = open_shard(args.data_dir, args.fsync == "always", args.snapshot_every,
                        M=args.M, ef_construction=args.ef_construction,
-                       ef_search=args.ef_search, seed=args.seed)
+                       ef_search=args.ef_search, seed=args.seed,
+                       neighbor_selection=args.neighbor_selection)
     if isinstance(shard, DurableShard):
         print(f"recovered {len(shard)} vectors from {args.data_dir} (snapshot at seq "
               f"{shard.snapshot_seq}, replayed {shard.replayed_records} log records)", flush=True)
