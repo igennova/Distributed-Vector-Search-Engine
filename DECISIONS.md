@@ -279,3 +279,24 @@
 - The rule is a setting (`neighbor_selection`) stored in snapshots, so a restored replica keeps
   building its graph the same way as its twin. Snapshots written before the setting existed
   load as "closest".
+
+## Command-line interface
+- `vsearch cluster up` starts the shard servers as detached background processes (their own
+  session, logs to a file) and records their ports and process ids in `cluster.json`, written
+  with the same write-temp-then-rename used for snapshots. Later commands read that file to
+  know where to connect.
+- `cluster down` stops the servers but keeps their data directories, so `cluster up` again
+  restarts the same layout and every server recovers from its snapshot and log. Deleting the
+  data takes an explicit `--wipe`.
+- Process ids are reused by the OS. Before signalling a recorded pid, the CLI checks with `ps`
+  that it is still a `vsearch.server` on the recorded port, so a stale state file can never
+  kill an unrelated process.
+- `similar` maps results back to words through the GloVe word list: global ids are row numbers
+  in that list. That only works because the dataset is fixed; storing a payload next to each
+  vector is the general answer and comes with the retrieval layer.
+- Each command is a new process with a new coordinator, so the "this replica just failed, try
+  it last" memory does not carry over between commands: with a server down, each `similar`
+  that picks it first pays one failover again (a few ms). A long-running coordinator service
+  would keep that state.
+- Built with argparse; no new dependency. A console script makes it `vsearch ...`, and
+  `python -m vsearch ...` works without installing.

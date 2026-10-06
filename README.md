@@ -23,7 +23,53 @@ and merges the results.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+pip install -e .          # adds the `vsearch` command
 ```
+
+## Quick start
+
+Start a local cluster, index real word vectors, and search them. This needs Stanford's GloVe 6B
+vectors: download `glove.6B.zip` (862 MB) from https://nlp.stanford.edu/projects/glove/ into
+`data/`. The first load caches the 100-dimension vectors as a `.npy` file, after which the zip
+can be deleted.
+
+```console
+$ vsearch cluster up --shards 4 --replicas 2      # 8 shard servers, running in the background
+$ vsearch load glove --limit 100000
+loaded 100,000 words in 20.2s
+$ vsearch similar king
+words closest to 'king':
+  1. prince               0.768
+  2. queen                0.751
+  3. son                  0.702
+  4. brother              0.699
+  5. monarch              0.698
+(8.0 ms across 4 shards)
+```
+
+Crash a server and keep searching; restart it and it recovers from its own disk:
+
+```console
+$ vsearch cluster kill 2 0                        # SIGKILL shard 2's replica 0
+$ vsearch similar paris
+words closest to 'paris':
+  1. france               0.748
+  2. london               0.734
+  ...
+(16.5 ms across 4 shards, 1 failover(s))
+$ vsearch status
+shard replica  address          state   vectors  last seq  snapshot seq
+    2       0  127.0.0.1:50518  down
+    2       1  127.0.0.1:50519  up       25,000        10            10
+  ...
+$ vsearch cluster restart 2 0
+$ vsearch repair
+all reachable replicas are in sync
+$ vsearch cluster down                            # data stays on disk; `cluster up` brings it back
+```
+
+The cluster's state, data, and logs live in `data/cluster` (change it with `--home`).
+`vsearch cluster down --wipe` deletes them.
 
 ## Project layout
 
@@ -36,6 +82,7 @@ vsearch/            the engine
   server.py           one shard served over gRPC, plus replica catch-up
   storage.py          snapshots + write-ahead log, so a shard survives restarts
   client.py           gRPC coordinator (replication, failover, repair) + local cluster launcher
+  cli.py              the `vsearch` command
   protos/shard.proto  the gRPC contract (Add, Search)
 scripts/            gen_protos.sh regenerates the gRPC code from the .proto
 tests/              pytest suite
@@ -58,9 +105,7 @@ python -m benchmarks.bench_resync        # catching up a replica: from the log v
 python -m benchmarks.bench_glove         # real word vectors (needs the GloVe download, below)
 ```
 
-The GloVe benchmark needs Stanford's GloVe 6B vectors: download `glove.6B.zip` (862 MB) from
-https://nlp.stanford.edu/projects/glove/ into `data/`. The first run caches the 100-dimension
-vectors as a `.npy` file, after which the zip can be deleted.
+The GloVe benchmark uses the same download as the quick start.
 
 ### Running shards as network services
 
@@ -317,7 +362,7 @@ log. Run it with `python -m benchmarks.bench_resync`.
 - [x] Durability: snapshots + write-ahead log; a restarted server recovers its data
 - [x] Replica resync: a replica that missed writes or lost its disk catches up from its twin
 - [x] Real-data benchmarks: GloVe word vectors up to 400k, diversity heuristic for links
-- [ ] Command-line interface
+- [x] Command-line interface (`vsearch`)
 - [ ] Retrieval layer for AI agents: text ingestion, payloads, metadata filtering
 - [ ] Docker / Kubernetes deployment
 
