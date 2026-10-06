@@ -19,7 +19,7 @@ from typing import NamedTuple
 import grpc
 import numpy as np
 
-from .cluster import merge_top_k, route_round_robin
+from .cluster import merge_top_k_scored, route_round_robin
 from .protos import shard_pb2, shard_pb2_grpc
 
 # gRPC rejects messages over 4 MB by default; keep each Add request well under that.
@@ -184,10 +184,14 @@ class GrpcCoordinator:
 
     def search(self, query, k=10):
         """Global top-k ids. Raises ShardUnavailableError if any shard has no live replica."""
-        ids, missing = self.search_partial(query, k)
+        return [global_id for _, global_id in self.search_scored(query, k)]
+
+    def search_scored(self, query, k=10):
+        """Like search, but returns (distance, global_id) pairs, closest first."""
+        scored, missing = self._scatter_gather(query, k)
         if missing:
             raise ShardUnavailableError(missing)
-        return ids
+        return scored
 
     def search_partial(self, query, k=10):
         """Like search, but skips shards whose replicas are all down instead of failing.
@@ -195,6 +199,11 @@ class GrpcCoordinator:
         Returns (ids, missing_shards). A non-empty missing_shards means the results come
         from the remaining shards only and may lack some true nearest neighbors.
         """
+        scored, missing = self._scatter_gather(query, k)
+        return [global_id for _, global_id in scored], missing
+
+    def _scatter_gather(self, query, k):
+        """Ask one replica of every shard, failing over as needed. Returns (scored, missing_shards)."""
         request = shard_pb2.SearchRequest(query=np.asarray(query, dtype=np.float32).tolist(), k=k)
         now = time.monotonic()
         orders = [self._replica_order(shard, now) for shard in range(len(self.replicas))]
@@ -226,7 +235,7 @@ class GrpcCoordinator:
                 replica.down_until = 0.0
                 per_shard.append([(hit.distance, hit.global_id) for hit in hits])
             pending = retries
-        return merge_top_k(per_shard, k), sorted(missing)
+        return merge_top_k_scored(per_shard, k), sorted(missing)
 
     def _replica_order(self, shard, now):
         """Replicas to try for one shard: rotate the starting replica, recently failed ones last."""
@@ -251,7 +260,11 @@ class GrpcCoordinator:
         self.close()
 
 
-def _free_ports(n):
+REPO_ROOT = Path(__file__).resolve().parent.parent   # where `python -m vsearch.server` resolves
+
+
+def free_ports(n):
+    """n TCP ports that are free right now on this machine."""
     sockets = []
     try:
         for _ in range(n):
@@ -264,9 +277,22 @@ def _free_ports(n):
             s.close()
 
 
-def _wait_until_ready(address, timeout=20):
+def wait_until_ready(address, timeout=20):
     with grpc.insecure_channel(address) as channel:
         grpc.channel_ready_future(channel).result(timeout=timeout)
+
+
+def server_command(port, seed=None, data_dir=None, **server_args):
+    """The command line that starts one shard server. Extra keyword arguments become flags
+    (M, ef_construction, fsync, ...)."""
+    cmd = [sys.executable, "-m", "vsearch.server", "--port", str(port)]
+    for key, value in server_args.items():
+        cmd += [f"--{key.replace('_', '-')}", str(value)]
+    if seed is not None:
+        cmd += ["--seed", str(seed)]
+    if data_dir is not None:
+        cmd += ["--data-dir", str(data_dir)]
+    return cmd
 
 
 class LocalCluster:
@@ -291,7 +317,7 @@ class LocalCluster:
     def restart(self, shard, replica=0):
         """Start a stopped server again on the same address (and data directory)."""
         self.start(shard, replica)
-        _wait_until_ready(self.addresses[shard][replica])
+        wait_until_ready(self.addresses[shard][replica])
 
     def stop_all(self):
         running = [p for group in self.processes for p in group if p is not None]
@@ -311,32 +337,28 @@ def local_grpc_cluster(num_shards, replicas=1, seed=None, data_dir=None, **serve
     subdirectory, so a restarted server recovers its data. Other keyword arguments are
     passed to every server as command-line flags (M, ef_construction, fsync, ...).
     """
-    repo_root = Path(__file__).resolve().parent.parent
-    ports = iter(_free_ports(num_shards * replicas))
+    ports = iter(free_ports(num_shards * replicas))
     addresses, commands = [], []
     for shard in range(num_shards):
         addresses.append([])
         commands.append([])
         for replica in range(replicas):
             port = next(ports)
-            cmd = [sys.executable, "-m", "vsearch.server", "--port", str(port)]
-            for key, value in server_args.items():
-                cmd += [f"--{key.replace('_', '-')}", str(value)]
-            if seed is not None:
-                cmd += ["--seed", str(seed + shard)]
-            if data_dir is not None:
-                cmd += ["--data-dir", str(Path(data_dir) / f"shard-{shard}-replica-{replica}")]
+            server_dir = (Path(data_dir) / f"shard-{shard}-replica-{replica}"
+                          if data_dir is not None else None)
             addresses[shard].append(f"127.0.0.1:{port}")
-            commands[shard].append(cmd)
+            commands[shard].append(server_command(
+                port, seed=None if seed is None else seed + shard, data_dir=server_dir,
+                **server_args))
 
-    cluster = LocalCluster(addresses, commands, repo_root)
+    cluster = LocalCluster(addresses, commands, REPO_ROOT)
     try:
         for shard in range(num_shards):
             for replica in range(replicas):
                 cluster.start(shard, replica)
         for group in addresses:
             for address in group:
-                _wait_until_ready(address)
+                wait_until_ready(address)
         yield cluster
     finally:
         cluster.stop_all()

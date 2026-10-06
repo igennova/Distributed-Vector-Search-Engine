@@ -37,13 +37,18 @@ def route_round_robin(vectors, num_shards, start_id=0):
     return batches
 
 
-def merge_top_k(per_shard, k):
-    """Global top-k ids from each shard's (distance, global_id) results.
+def merge_top_k_scored(per_shard, k):
+    """Global top-k as (distance, global_id) pairs, closest first, from each shard's results.
 
     Each shard must return its full local top-k (not k / num_shards), because the
     global top-k can all live in a single shard.
     """
-    return [global_id for _, global_id in heapq.nsmallest(k, chain.from_iterable(per_shard))]
+    return heapq.nsmallest(k, chain.from_iterable(per_shard))
+
+
+def merge_top_k(per_shard, k):
+    """Global top-k ids from each shard's (distance, global_id) results."""
+    return [global_id for _, global_id in merge_top_k_scored(per_shard, k)]
 
 
 class Shard:
