@@ -51,8 +51,8 @@ def main():
             follower_dir = tmp / f"follower-{missed}"
             follower_dir.mkdir()
             wal = WriteAheadLog(follower_dir / "wal.log", fsync=False)
-            for seq, ids, vecs in records[:(N - missed) // BATCH]:
-                wal.append(seq, ids, vecs)
+            for seq, ids, vecs, payloads in records[:(N - missed) // BATCH]:
+                wal.append(seq, ids, vecs, payloads)
             wal.close()
             elapsed, result = time_sync(follower_dir, leader_address)
             print(f"  {missed:>5,} vectors {result.method:<10}{result.records_applied:>8}"

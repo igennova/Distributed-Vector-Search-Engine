@@ -160,12 +160,12 @@ def test_records_after_says_when_the_log_no_longer_covers_them(tmp_path):
     shard = DurableShard(tmp_path, snapshot_every=0, **PARAMS)
     for ids, vectors in batches[:3]:
         shard.add_batch(ids, vectors)
-    assert [seq for seq, _, _ in shard.records_after(1)] == [2, 3]
+    assert [record[0] for record in shard.records_after(1)] == [2, 3]
 
     shard.checkpoint()                                             # seqs 1-3 now only in the snapshot
     shard.add_batch(*batches[3])
     assert shard.records_after(1) is None
-    assert [seq for seq, _, _ in shard.records_after(3)] == [4]
+    assert [record[0] for record in shard.records_after(3)] == [4]
 
 
 def test_install_snapshot_copies_a_peer_exactly(tmp_path):

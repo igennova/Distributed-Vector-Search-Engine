@@ -7,8 +7,13 @@ Recovery:    load the snapshot -> replay WAL records newer than it -> cut off a 
 Checkpoint:  write a new snapshot (atomically) -> empty the WAL.
 
 WAL record layout (little-endian):
-    [payload length: u32][crc32 of payload: u32]
-    payload = [seq: u64][count: u32][dim: u32][global ids: count x i64][vectors: count*dim x f32]
+    [body length: u32][crc32 of body: u32]
+    body = [seq: u64][count: u32][dim: u32][global ids: count x i64][vectors: count*dim x f32]
+           then, only when some vector in the record has a payload:
+           count x ([length: u32][payload: UTF-8 JSON text])
+
+A record whose vectors carry no payloads is byte-for-byte what it was before payloads existed,
+so logs written by older versions still read back.
 """
 import json
 import os
@@ -21,9 +26,10 @@ import numpy as np
 from .cluster import Shard
 from .hnsw import HNSW
 
-SNAPSHOT_FORMAT = 2   # 2: vectors stored at unit length; 1: vectors stored as inserted
-_HEADER = struct.Struct("<II")         # payload length, crc32
+SNAPSHOT_FORMAT = 3   # 3: adds payloads; 2: vectors stored at unit length; 1: as inserted
+_HEADER = struct.Struct("<II")         # body length, crc32
 _RECORD_START = struct.Struct("<QII")  # seq, count, dim
+_U32 = struct.Struct("<I")
 
 
 class OutOfOrderWrite(ValueError):
@@ -52,6 +58,10 @@ def save_snapshot(shard, last_seq, path):
         "vectors": np.asarray(index.vectors, dtype=np.float32),
         "global_ids": np.asarray(shard.global_ids, dtype=np.int64),
     }
+    # Payloads are variable-length text: one byte blob plus where each one starts.
+    encoded = [payload.encode("utf-8") for payload in shard.payloads]
+    arrays["payload_offsets"] = np.cumsum([0] + [len(b) for b in encoded], dtype=np.int64)
+    arrays["payload_bytes"] = np.frombuffer(b"".join(encoded), dtype=np.uint8)
     # Each layer's adjacency lists, flattened: node ids, where each node's neighbors
     # start in `neighbors`, and the neighbors themselves.
     for layer, adjacency in enumerate(index.graph):
@@ -94,7 +104,7 @@ def load_snapshot(path, ef_search=None):
     """
     with np.load(path, allow_pickle=False) as data:
         meta = json.loads(str(data["meta"]))
-        if meta["format"] not in (1, SNAPSHOT_FORMAT):
+        if meta["format"] not in (1, 2, SNAPSHOT_FORMAT):
             raise ValueError(f"unsupported snapshot format {meta['format']}")
 
         index = HNSW(M=meta["M"], ef_construction=meta["ef_construction"],
@@ -102,9 +112,9 @@ def load_snapshot(path, ef_search=None):
                      # snapshots written before this setting existed used "closest"
                      neighbor_selection=meta.get("neighbor_selection", "closest"))
         index.rng.bit_generator.state = meta["rng_state"]
-        # Format 2 already stores unit vectors: keep them bit for bit, so a restored replica
-        # keeps building exactly the same graph as its twin.
-        index.set_vectors(data["vectors"], normalized=meta["format"] == SNAPSHOT_FORMAT)
+        # From format 2 on, vectors are stored at unit length: keep them bit for bit, so a
+        # restored replica keeps building exactly the same graph as its twin.
+        index.set_vectors(data["vectors"], normalized=meta["format"] >= 2)
         for layer in range(meta["num_layers"]):
             nodes = data[f"layer{layer}_nodes"].tolist()
             offsets = data[f"layer{layer}_offsets"].tolist()
@@ -117,7 +127,31 @@ def load_snapshot(path, ef_search=None):
         shard = Shard()
         shard.index = index
         shard.global_ids = data["global_ids"].tolist()
+        if "payload_offsets" in data.files:
+            offsets = data["payload_offsets"].tolist()
+            blob = data["payload_bytes"].tobytes()
+            shard.payloads = [blob[offsets[i]:offsets[i + 1]].decode("utf-8")
+                              for i in range(len(offsets) - 1)]
+        else:                                    # snapshot from before payloads existed
+            shard.payloads = [""] * len(shard.global_ids)
     return shard, meta["last_seq"]
+
+
+def _parse_payloads(body, pos, count):
+    """The payload section of a record body starting at `pos`, or None if it is malformed."""
+    if pos == len(body):
+        return [""] * count                      # no payload section: none of them has one
+    payloads = []
+    for _ in range(count):
+        if pos + _U32.size > len(body):
+            return None
+        (size,) = _U32.unpack_from(body, pos)
+        pos += _U32.size
+        if pos + size > len(body):
+            return None
+        payloads.append(body[pos:pos + size].decode("utf-8"))
+        pos += size
+    return payloads if pos == len(body) else None
 
 
 def _read_records(path):
@@ -136,17 +170,21 @@ def _read_records(path):
         start, end = pos + _HEADER.size, pos + _HEADER.size + length
         if end > len(data) or length < _RECORD_START.size:
             break
-        payload = data[start:end]
-        if zlib.crc32(payload) != crc:
+        body = data[start:end]
+        if zlib.crc32(body) != crc:
             break
-        seq, count, dim = _RECORD_START.unpack_from(payload)
-        if length != _RECORD_START.size + 8 * count + 4 * count * dim:
-            break
+        seq, count, dim = _RECORD_START.unpack_from(body)
         offset = _RECORD_START.size
-        ids = np.frombuffer(payload, dtype="<i8", count=count, offset=offset)
-        vectors = np.frombuffer(payload, dtype="<f4", count=count * dim,
+        vectors_end = offset + 8 * count + 4 * count * dim
+        if length < vectors_end:
+            break
+        ids = np.frombuffer(body, dtype="<i8", count=count, offset=offset)
+        vectors = np.frombuffer(body, dtype="<f4", count=count * dim,
                                 offset=offset + 8 * count).reshape(count, dim)
-        records.append((seq, ids.tolist(), vectors.copy()))
+        payloads = _parse_payloads(body, vectors_end, count)
+        if payloads is None:
+            break
+        records.append((seq, ids.tolist(), vectors.copy(), payloads))
         pos = end
     return records, pos
 
@@ -165,12 +203,15 @@ class WriteAheadLog:
                 os.fsync(f.fileno())
         self.file = open(self.path, "ab")
 
-    def append(self, seq, global_ids, vectors):
+    def append(self, seq, global_ids, vectors, payloads=None):
         ids = np.asarray(global_ids, dtype="<i8")
         vectors = np.ascontiguousarray(vectors, dtype="<f4")
         count, dim = vectors.shape
-        payload = _RECORD_START.pack(seq, count, dim) + ids.tobytes() + vectors.tobytes()
-        self.file.write(_HEADER.pack(len(payload), zlib.crc32(payload)) + payload)
+        body = _RECORD_START.pack(seq, count, dim) + ids.tobytes() + vectors.tobytes()
+        if payloads and any(payloads):
+            encoded = [payload.encode("utf-8") for payload in payloads]
+            body += b"".join(_U32.pack(len(b)) + b for b in encoded)
+        self.file.write(_HEADER.pack(len(body), zlib.crc32(body)) + body)
         self.file.flush()             # hand the bytes to the OS
         if self.fsync:
             os.fsync(self.file.fileno())   # and make the OS put them on disk now
@@ -212,18 +253,18 @@ class DurableShard:
         self.wal = WriteAheadLog(self.data_dir / "wal.log", fsync=fsync)
         self.replayed_records = 0
         self.vectors_since_snapshot = 0
-        for seq, ids, vectors in self.wal.recovered:
+        for seq, ids, vectors, payloads in self.wal.recovered:
             if seq <= self.last_seq:
                 continue
             if seq != self.last_seq + 1:
                 raise RuntimeError(f"write-ahead log jumps from seq {self.last_seq} to {seq}")
-            self.shard.add_batch(ids, vectors)
+            self.shard.add_batch(ids, vectors, payloads)
             self.last_seq = seq
             self.replayed_records += 1
             self.vectors_since_snapshot += len(ids)
         self.wal.recovered = None
 
-    def add_batch(self, global_ids, vectors, seq=None):
+    def add_batch(self, global_ids, vectors, payloads=None, seq=None):
         """Log and apply one write. If `seq` is given it must be exactly the next one, so the
         same write gets the same number on every replica (what log catch-up relies on)."""
         expected = self.last_seq + 1
@@ -231,8 +272,8 @@ class DurableShard:
             raise OutOfOrderWrite(
                 f"write seq {seq} does not follow this replica's last seq {self.last_seq}")
         seq = expected
-        self.wal.append(seq, global_ids, vectors)   # durable before anything else happens
-        self.shard.add_batch(global_ids, vectors)
+        self.wal.append(seq, global_ids, vectors, payloads)   # durable before anything else
+        self.shard.add_batch(global_ids, vectors, payloads)
         self.last_seq = seq
         self.vectors_since_snapshot += len(global_ids)
         if self.snapshot_every and self.vectors_since_snapshot >= self.snapshot_every:
@@ -278,6 +319,9 @@ class DurableShard:
 
     def search(self, query, k):
         return self.shard.search(query, k)
+
+    def search_with_payloads(self, query, k):
+        return self.shard.search_with_payloads(query, k)
 
     def __len__(self):
         return len(self.shard)

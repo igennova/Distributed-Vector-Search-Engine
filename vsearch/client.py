@@ -19,7 +19,8 @@ from typing import NamedTuple
 import grpc
 import numpy as np
 
-from .cluster import merge_top_k_scored, route_round_robin
+from .cluster import (Hit, decode_payload, encode_payloads, merge_top_k_scored,
+                      route_round_robin)
 from .protos import shard_pb2, shard_pb2_grpc
 
 # gRPC rejects messages over 4 MB by default; keep each Add request well under that.
@@ -86,33 +87,40 @@ class GrpcCoordinator:
         self._next_replica = [0] * len(self.replicas) # round-robin position per shard
         self._last_seqs = [None] * len(self.replicas) # per shard: last write all replicas agree on
 
-    def add(self, vectors):
+    def add(self, vectors, payloads=None):
+        """Index vectors, optionally each with a payload (a JSON-serializable dict, or None)."""
         vectors = np.asarray(vectors, dtype=np.float32)
         if len(vectors) == 0:
             return self
+        encoded = encode_payloads(payloads, len(vectors))
         self._check_seqs()
         dim = vectors.shape[1]
-        per_request = max(1, MAX_ADD_BYTES // (dim * vectors.itemsize))
-        batches = route_round_robin(vectors, len(self.replicas), start_id=self.size)
+        # Payloads share the request with their vectors, so leave room for the largest one.
+        largest_payload = max(len(text.encode("utf-8")) for text in encoded)
+        per_request = max(1, MAX_ADD_BYTES // (dim * vectors.itemsize + largest_payload))
+        batches = route_round_robin(vectors, len(self.replicas), start_id=self.size,
+                                    payloads=encoded)
         self.size += len(vectors)
 
         # Write-all: every chunk goes to every replica of its shard, so the copies stay
         # identical. Chunk i is sent everywhere before waiting on any, so all servers build
         # in parallel. If any replica fails, the write fails (and those replicas may now
         # differ until they are rebuilt).
-        longest = max(len(ids) for ids, _ in batches)
+        longest = max(len(ids) for ids, _, _ in batches)
         for start in range(0, longest, per_request):
             calls = []
-            for shard, (ids, vecs) in enumerate(batches):
+            for shard, (ids, vecs, texts) in enumerate(batches):
                 chunk_ids = ids[start:start + per_request]
                 if not chunk_ids:
                     continue
                 chunk = np.asarray(vecs[start:start + per_request], dtype=np.float32)
+                chunk_payloads = texts[start:start + per_request]
                 # Durable replicas only accept the exact next seq, so this chunk gets the same
                 # number on every replica of the shard.
                 seq = 0 if self._last_seqs[shard] == _UNCHECKED else self._last_seqs[shard] + 1
-                request = shard_pb2.AddRequest(global_ids=chunk_ids, dim=dim,
-                                               values=chunk.ravel().tolist(), seq=seq)
+                request = shard_pb2.AddRequest(
+                    global_ids=chunk_ids, dim=dim, values=chunk.ravel().tolist(), seq=seq,
+                    payloads=chunk_payloads if any(chunk_payloads) else [])
                 for replica in self.replicas[shard]:
                     calls.append((shard, replica.stub.Add.future(request, timeout=self.add_timeout)))
 
@@ -193,6 +201,13 @@ class GrpcCoordinator:
             raise ShardUnavailableError(missing)
         return scored
 
+    def search_hits(self, query, k=10):
+        """The k nearest vectors as Hit(id, distance, payload), closest first."""
+        scored, missing = self._scatter_gather(query, k, with_payloads=True)
+        if missing:
+            raise ShardUnavailableError(missing)
+        return [Hit(global_id, dist, decode_payload(text)) for dist, global_id, text in scored]
+
     def search_partial(self, query, k=10):
         """Like search, but skips shards whose replicas are all down instead of failing.
 
@@ -202,9 +217,10 @@ class GrpcCoordinator:
         scored, missing = self._scatter_gather(query, k)
         return [global_id for _, global_id in scored], missing
 
-    def _scatter_gather(self, query, k):
+    def _scatter_gather(self, query, k, with_payloads=False):
         """Ask one replica of every shard, failing over as needed. Returns (scored, missing_shards)."""
-        request = shard_pb2.SearchRequest(query=np.asarray(query, dtype=np.float32).tolist(), k=k)
+        request = shard_pb2.SearchRequest(query=np.asarray(query, dtype=np.float32).tolist(), k=k,
+                                          with_payloads=with_payloads)
         now = time.monotonic()
         orders = [self._replica_order(shard, now) for shard in range(len(self.replicas))]
         tried = [0] * len(self.replicas)
@@ -233,7 +249,8 @@ class GrpcCoordinator:
                         missing.append(shard)
                     continue
                 replica.down_until = 0.0
-                per_shard.append([(hit.distance, hit.global_id) for hit in hits])
+                per_shard.append([(hit.distance, hit.global_id, hit.payload) if with_payloads
+                                  else (hit.distance, hit.global_id) for hit in hits])
             pending = retries
         return merge_top_k_scored(per_shard, k), sorted(missing)
 

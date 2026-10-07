@@ -30,17 +30,21 @@ class ShardServicer(shard_pb2_grpc.ShardServiceServicer):
 
     def Add(self, request, context):
         vectors = np.asarray(request.values, dtype=np.float32).reshape(-1, request.dim)
+        ids, payloads = list(request.global_ids), list(request.payloads)
+        if payloads and len(payloads) != len(ids):
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT,
+                          f"{len(payloads)} payloads for {len(ids)} vectors")
         with self.lock:
             # A durable shard logs the batch before applying it, so by the time this
             # reply goes out the write can no longer be lost.
             if not request.seq:
-                self.shard.add_batch(list(request.global_ids), vectors)
+                self.shard.add_batch(ids, vectors, payloads)
             elif not self.durable:
                 context.abort(grpc.StatusCode.FAILED_PRECONDITION,
                               "numbered writes need a durable shard (--data-dir)")
             else:
                 try:
-                    self.shard.add_batch(list(request.global_ids), vectors, seq=request.seq)
+                    self.shard.add_batch(ids, vectors, payloads, seq=request.seq)
                 except OutOfOrderWrite as err:
                     context.abort(grpc.StatusCode.FAILED_PRECONDITION, f"{err}; run repair()")
             return shard_pb2.AddResponse(size=len(self.shard))
@@ -48,9 +52,14 @@ class ShardServicer(shard_pb2_grpc.ShardServiceServicer):
     def Search(self, request, context):
         query = np.asarray(request.query, dtype=np.float32)
         with self.lock:
-            hits = self.shard.search(query, request.k)
+            if request.with_payloads:
+                hits = self.shard.search_with_payloads(query, request.k)
+            else:
+                hits = [(dist, global_id, "") for dist, global_id in
+                        self.shard.search(query, request.k)]
         return shard_pb2.SearchResponse(
-            hits=[shard_pb2.Hit(global_id=global_id, distance=dist) for dist, global_id in hits])
+            hits=[shard_pb2.Hit(global_id=global_id, distance=dist, payload=payload)
+                  for dist, global_id, payload in hits])
 
     def Status(self, request, context):
         with self.lock:
@@ -67,9 +76,10 @@ class ShardServicer(shard_pb2_grpc.ShardServiceServicer):
             context.abort(grpc.StatusCode.FAILED_PRECONDITION,
                           f"log no longer reaches back to seq {request.after_seq + 1}; "
                           "fetch the snapshot instead")
-        for seq, ids, vectors in records:
+        for seq, ids, vectors, payloads in records:
             yield shard_pb2.LogRecord(seq=seq, global_ids=ids, dim=vectors.shape[1],
-                                      values=vectors.ravel().tolist())
+                                      values=vectors.ravel().tolist(),
+                                      payloads=payloads if any(payloads) else [])
 
     def FetchSnapshot(self, request, context):
         self._require_durable(context)
@@ -112,7 +122,8 @@ def catch_up(shard, peer, attempts=3):
                 for record in stub.FetchLog(shard_pb2.FetchLogRequest(after_seq=shard.last_seq),
                                             timeout=SYNC_TIMEOUT):
                     vectors = np.asarray(record.values, dtype=np.float32).reshape(-1, record.dim)
-                    shard.add_batch(list(record.global_ids), vectors, seq=record.seq)
+                    shard.add_batch(list(record.global_ids), vectors, list(record.payloads),
+                                    seq=record.seq)
                     applied += 1
                 return method, applied
             except grpc.RpcError as err:

@@ -24,6 +24,7 @@ message AddRequest {
   repeated float values = 3;   // len(global_ids) * dim floats, one vector after another
   uint64 seq = 4;              // sequence number this write must get (0 = unchecked); a durable
                                // replica rejects it unless it equals its last seq + 1
+  repeated string payloads = 5;  // one JSON text per vector ("" = none); empty = no payloads at all
 }
 
 message AddResponse {
@@ -33,11 +34,13 @@ message AddResponse {
 message SearchRequest {
   repeated float query = 1;
   int32 k = 2;
+  bool with_payloads = 3;      // also return each hit's payload
 }
 
 message Hit {
   int64 global_id = 1;
   float distance = 2;          // cosine distance: smaller is closer
+  string payload = 3;          // JSON text stored with the vector; only set if requested
 }
 
 message SearchResponse {
@@ -62,6 +65,7 @@ message LogRecord {
   repeated int64 global_ids = 2;
   int32 dim = 3;
   repeated float values = 4;
+  repeated string payloads = 5;
 }
 
 message FetchSnapshotRequest {}
