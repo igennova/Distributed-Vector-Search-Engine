@@ -99,3 +99,14 @@ def test_heuristic_may_use_fewer_slots_than_allowed():
 def test_unknown_neighbor_selection_is_rejected():
     with pytest.raises(ValueError):
         HNSW(neighbor_selection="random")
+
+
+def test_every_distance_is_a_float32_value():
+    # Distances cross the network as float32. If any were computed at higher precision,
+    # a remote result would differ from the same result computed locally.
+    rng = np.random.default_rng(3)
+    index = HNSW(M=8, ef_construction=32, ef_search=32, seed=0).build(
+        rng.standard_normal((300, 16)).astype(np.float32))
+    for q in rng.standard_normal((50, 16)).astype(np.float32):
+        for dist, _ in index.search_with_distances(q, 20):
+            assert dist == float(np.float32(dist))

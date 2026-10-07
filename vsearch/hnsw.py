@@ -10,6 +10,7 @@ Graph representation:
 
 Vectors are normalized once when inserted, so cosine distance is just 1 - dot product, and
 the distances from a query to a whole neighbor list come from one matrix-vector product.
+Every distance is computed in float32, so it is unchanged by a trip through a float32 field.
 Internal search methods expect a normalized query; the public ones normalize it themselves.
 """
 import heapq
@@ -93,7 +94,7 @@ class HNSW:
         Used to descend the sparse upper layers and to seed the layer-0 search.
         """
         current = entry
-        current_dist = 1.0 - float(self._data[current] @ query)
+        current_dist = float(1.0 - self._data[current] @ query)
 
         while True:
             neighbors = self.graph[layer][current]
@@ -119,7 +120,7 @@ class HNSW:
         results    : max-heap stored as (-distance, id) -> the farthest kept node is on
                      top, so it is cheap to drop when the set exceeds ef
         """
-        d_entry = 1.0 - float(self._data[entry] @ query)
+        d_entry = float(1.0 - self._data[entry] @ query)
         visited = {entry}
         candidates = [(d_entry, entry)]
         results = [(-d_entry, entry)]
