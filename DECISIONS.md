@@ -300,3 +300,46 @@
   would keep that state.
 - Built with argparse; no new dependency. A console script makes it `vsearch ...`, and
   `python -m vsearch ...` works without installing.
+
+## Payloads
+- A search returned ids and distances only; the CLI's `similar` could show words only because
+  it looked ids up in the GloVe word list on the side. Anything built on top (retrieval for an
+  LLM, agent memory) needs the stored data itself back, with where it came from.
+- A payload is any JSON-serializable dict, or nothing. The coordinator encodes it to JSON text
+  once; shards store and return that text and never parse it, so they stay independent of what
+  is inside. "" means no payload.
+- Payloads travel with their vector everywhere: in `Add`, in the write-ahead log record, in the
+  snapshot, and in the log records and snapshots that resync ships. A payload that was only in
+  memory would be lost exactly when its vector survived.
+- Formats were extended without breaking old data. A log record gains a payload section only
+  when some vector in it has a payload, so a record without payloads is byte for byte what it
+  was before (a test pins the size). Snapshots moved to format 3, which adds a byte blob plus
+  offsets; formats 1 and 2 still load, with no payloads. New proto fields got new field numbers.
+- Payload text is stored as one blob with offsets rather than pickled, for the same reason as
+  the vectors: loading a pickle can execute code.
+- Uploads still split into requests of at most 2 MB, now sized by the largest payload in the
+  batch as well as the vector size.
+- Plain `search` is unchanged and returns ids. `search_hits` returns Hit(id, distance, payload);
+  the server only sends payloads when asked, so searches that don't need them don't pay for them.
+- Not done: payloads live in memory with the index. Large texts would be better kept on disk and
+  read only for the final top-k.
+
+## Floating-point details found while testing payloads
+- A new test compared full results (ids, distances, payloads) between a local index and a
+  replica reached over gRPC, and one distance differed in the 8th decimal place.
+- First suspicion: the replicas' graphs had diverged. Checked directly in one process: vectors,
+  graphs, and results are identical between copies, including after a restart from the log. So
+  that was wrong.
+- Actual cause: the distance to a search's starting node was computed as
+  `1.0 - float(dot)`, which subtracts in float64, while every other distance was computed as
+  `1.0 - dots` in float32. Distances travel as float32 over gRPC, so that one value was rounded
+  on the wire and no longer equalled the local one. Earlier tests compared ids only, or
+  happened not to have the starting node among the results. Fixed by computing every distance
+  in float32; a test now checks every returned distance is a float32 value, and both it and
+  the cross-process test fail on the old code.
+- Also measured along the way: numpy's matrix-vector product can give the same row a result
+  that differs in the last bit depending on its position in the batch (2 distinct values for
+  one row across batch sizes 1 to 40), while memory alignment made no difference. So the same
+  (node, query) distance can differ by one ulp between two searches that reach the node in
+  different batches. Identical replicas walk identical paths and still agree exactly.
+- Benchmarks were unaffected by the fix (same recall at every ef_search).

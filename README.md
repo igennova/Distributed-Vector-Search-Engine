@@ -154,6 +154,20 @@ every replica level with the most up-to-date copy of its shard (this needs `--da
 synced = coord.repair()   # one ReplicaSync per replica that caught up, via "log" or "snapshot"
 ```
 
+### Payloads
+
+A vector can carry a payload: any JSON-serializable dict, such as the text it was made from and
+where that text came from. Payloads are stored with the vector (in the write-ahead log and the
+snapshots, so they survive restarts and replica resync) and come back with search results:
+
+```python
+coord.add(vectors, payloads=[{"text": "Writes go to every replica...", "source": "DECISIONS.md"},
+                             None,          # a vector without a payload
+                             ...])
+for hit in coord.search_hits(query, k=5):
+    print(hit.id, hit.distance, hit.payload)
+```
+
 For replicas, start more than one server per shard with that shard's seed (for example a second
 set on ports 50061–50064 with `--seed 0` to `--seed 3`) and pass one list of addresses per shard.
 Writes go to every copy, and a search keeps working if a copy dies:
@@ -363,7 +377,11 @@ log. Run it with `python -m benchmarks.bench_resync`.
 - [x] Replica resync: a replica that missed writes or lost its disk catches up from its twin
 - [x] Real-data benchmarks: GloVe word vectors up to 400k, diversity heuristic for links
 - [x] Command-line interface (`vsearch`)
-- [ ] Retrieval layer for AI agents: text ingestion, payloads, metadata filtering
+- [x] Payloads: data stored with each vector and returned with search results
+- [ ] Text ingestion: chunk documents and embed them
+- [ ] Metadata filtering and namespaces
+- [ ] MCP server, agent memory, and a self-healing operations agent
+- [ ] Evaluations for retrieval and agent behavior
 - [ ] Docker / Kubernetes deployment
 
 ## Design notes
