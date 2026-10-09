@@ -69,3 +69,87 @@ def test_helpful_errors(tmp_path, glove_dir, capsys):
         assert run(home, "cluster", "kill", "3", "0") == 1   # no such server
     finally:
         run(home, "cluster", "down", "--wipe")
+
+
+GUIDE = """\
+# Storage
+
+## Write-ahead log
+
+Every write is appended to a log file before it is applied. After a crash the server
+replays the log and loses nothing.
+
+## Snapshots
+
+A snapshot saves the whole graph to disk, so recovery does not have to replay every write.
+"""
+
+
+def result_sources(output):
+    """Where each passage came from, from `vsearch search` lines such as
+    '  1. 0.512  docs/guide.md > Storage > Snapshots'."""
+    return [line.split(None, 2)[2] for line in output.splitlines() if line.strip()[:1].isdigit()]
+
+
+def test_ingest_and_search_documents(tmp_path, glove_dir, capsys, monkeypatch):
+    home = tmp_path / "cluster"
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text(GUIDE)
+    (docs / "notes.txt").write_text("Replicas answer searches in turn.\n")
+    monkeypatch.chdir(tmp_path)
+    question = "what happens to the log after a crash?"
+    try:
+        assert run(home, "search", question) == 1          # no cluster yet
+        assert run(home, "cluster", "up", "--shards", "2", "--replicas", "2") == 0
+        assert run(home, "search", question) == 1          # nothing ingested
+        assert "vsearch ingest" in capsys.readouterr().err
+
+        assert run(home, "ingest", "docs") == 0
+        assert "ingested 3 passages" in capsys.readouterr().out
+        assert run(home, "search", question, "-k", "2") == 0
+        output = capsys.readouterr().out
+        assert result_sources(output)[0] == "docs/guide.md > Storage > Write-ahead log"
+        assert "replays the log" in " ".join(output.split())     # the snippet is wrapped
+
+        # The same files again add nothing; a changed file is reported, not duplicated.
+        assert run(home, "ingest", "docs") == 0
+        assert "ingested 0 passages" in capsys.readouterr().out
+        (docs / "notes.txt").write_text("Something new.\n")
+        (docs / "more.md").write_text("# Sharding\n\nVectors are spread over shards by id.\n")
+        assert run(home, "ingest", "docs") == 0
+        output = capsys.readouterr().out
+        assert "notes.txt: changed" in output and "ingested 1 passages" in output
+        assert run(home, "status") == 0
+        assert "ingested: 4 passages from 3 file(s)" in capsys.readouterr().out
+
+        # Words and documents do not mix in one cluster.
+        assert run(home, "similar", "w5") == 1
+        assert run(home, "load", "glove", "--glove-dir", str(glove_dir)) == 1
+        assert run(home, "ingest", "missing-folder") == 1
+        capsys.readouterr()
+
+        # Passages are payloads, so they survive a crash and a full restart like the vectors.
+        assert run(home, "cluster", "kill", "1", "0") == 0
+        assert run(home, "cluster", "down") == 0
+        assert run(home, "cluster", "up") == 0
+        capsys.readouterr()
+        assert run(home, "search", "spread over shards", "--full") == 0
+        output = capsys.readouterr().out
+        assert result_sources(output)[0] == "docs/more.md > Sharding"
+        assert "Vectors are spread over shards by id." in output
+    finally:
+        run(home, "cluster", "down", "--wipe")
+
+
+def test_documents_cannot_be_ingested_into_a_word_cluster(tmp_path, glove_dir, capsys):
+    home = tmp_path / "cluster"
+    (tmp_path / "a.md").write_text("Some text.\n")
+    try:
+        assert run(home, "cluster", "up", "--shards", "1", "--replicas", "1") == 0
+        assert run(home, "load", "glove", "--limit", "50", "--glove-dir", str(glove_dir)) == 0
+        assert run(home, "ingest", str(tmp_path / "a.md")) == 1
+        assert run(home, "search", "text") == 1
+        assert "vsearch similar" in capsys.readouterr().err
+    finally:
+        run(home, "cluster", "down", "--wipe")

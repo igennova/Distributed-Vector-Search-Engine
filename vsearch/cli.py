@@ -4,6 +4,8 @@ Command-line interface for running and querying a local cluster.
     vsearch cluster up --shards 4 --replicas 2    start shard servers in the background
     vsearch load glove --limit 100000             index the most frequent GloVe words
     vsearch similar king                          nearest words, with their similarity
+    vsearch ingest docs/ README.md                split documents into passages and index them
+    vsearch search "how does recovery work?"      the passages closest to a question
     vsearch status                                state, size, and write position of every server
     vsearch cluster kill 0 1                      crash shard 0's replica 1
     vsearch cluster restart 0 1                   start it again (it recovers from disk)
@@ -20,6 +22,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -28,9 +31,13 @@ import grpc
 from .client import (REPO_ROOT, GrpcCoordinator, ReplicasOutOfSyncError, ShardUnavailableError,
                      free_ports, server_command, wait_until_ready)
 from .dataset import load_glove
+from .embedding import EMBEDDERS, get_embedder
+from .ingest import find_documents, fingerprint, ingest_passages, read_passages
 from .protos import shard_pb2, shard_pb2_grpc
 
 LOAD_BATCH = 10_000
+DEFAULT_EMBEDDER = "hash"
+SNIPPET_CHARS = 240
 _spawned = []     # keep handles to servers started by this process until it exits
 
 
@@ -210,16 +217,25 @@ def status(args):
             print(f"{shard:>5} {replica:>7}  {_address(server):<17}{'up':<6}{reply.size:>9,}"
                   f"{reply.last_seq:>10}{reply.snapshot_seq:>14}")
     dataset = state.get("dataset")
-    if dataset:
+    if dataset and dataset["name"] == "documents":
+        print(f"ingested: {dataset['passages']:,} passages from {len(dataset['sources'])} "
+              f"file(s), embedder: {dataset['embedder']}")
+    elif dataset:
         print(f"loaded: the {dataset['limit']:,} most frequent {dataset['name']} words")
     return 0
 
 
-def load(args):
-    state = _read_state(args.home)
+def _writable(state):
+    """Every server's status, after checking that all of them are up to take a write."""
     replies = [_server_status(server) for _, _, server in _servers(state)]
     if any(reply is None for reply in replies):
         raise CliError("a server is down, and writes need every replica; see: vsearch status")
+    return replies
+
+
+def load(args):
+    state = _read_state(args.home)
+    replies = _writable(state)
     if any(reply.size for reply in replies):
         raise CliError("this cluster already holds vectors; to start over: "
                        "vsearch cluster down --wipe")
@@ -246,6 +262,8 @@ def similar(args):
     dataset = state.get("dataset")
     if not dataset:
         raise CliError("nothing is loaded yet; run: vsearch load glove")
+    if dataset["name"] != "glove":
+        raise CliError("this cluster holds documents, not words; use: vsearch search \"...\"")
     words, vectors = load_glove(dataset["dir"])
     word = args.word.lower()                   # the GloVe 6B vocabulary is lowercase
     try:
@@ -269,6 +287,114 @@ def similar(args):
         print(f"{rank:>3}. {words[global_id]:<20} {1.0 - dist:.3f}")
     note = f", {failovers} failover(s)" if failovers else ""
     print(f"({elapsed_ms:.1f} ms across {len(state['servers'])} shards{note})")
+    return 0
+
+
+def _display_path(path):
+    """A path as the user would write it: relative to where they are, if it is below that."""
+    try:
+        return str(path.relative_to(Path.cwd()))
+    except ValueError:
+        return str(path)
+
+
+def ingest(args):
+    state = _read_state(args.home)
+    replies = _writable(state)
+    dataset = state.get("dataset")
+    if dataset is None:
+        if any(reply.size for reply in replies):
+            raise CliError("this cluster already holds vectors; to start over: "
+                           "vsearch cluster down --wipe")
+        embedder = get_embedder(args.embedder or DEFAULT_EMBEDDER)
+        dataset = {"name": "documents", "embedder": embedder.name, "dim": embedder.dim,
+                   "passages": 0, "sources": {}}
+    elif dataset["name"] != "documents":
+        raise CliError("this cluster holds GloVe words, and vectors from two embedders cannot "
+                       "share an index; start another cluster with --home")
+    elif args.embedder not in (None, dataset["embedder"]):
+        raise CliError(f"this cluster was built with the {dataset['embedder']!r} embedder; "
+                       "every passage in it has to use the same one")
+    else:
+        embedder = get_embedder(dataset["embedder"])
+
+    try:
+        files = find_documents(args.paths)
+    except FileNotFoundError as err:
+        raise CliError(str(err)) from None
+    if not files:
+        raise CliError("found no .md, .markdown, .txt, or .rst files there")
+
+    added = unchanged = 0
+    started = time.perf_counter()
+    try:
+        with _coordinator(state) as coordinator:
+            for path in files:
+                shown, digest = _display_path(path), fingerprint(path)
+                known = dataset["sources"].get(str(path))
+                if known and known["sha256"] == digest:
+                    unchanged += 1
+                    continue
+                if known:
+                    # The index has no delete yet, so the old passages cannot be replaced.
+                    print(f"  {shown}: changed since it was ingested, skipped "
+                          "(to re-index: vsearch cluster down --wipe)")
+                    continue
+                passages = read_passages(path, source=shown, max_chars=args.chunk_chars,
+                                         overlap=args.overlap)
+                count = ingest_passages(coordinator, embedder, passages)
+                dataset["sources"][str(path)] = {"sha256": digest, "passages": count}
+                dataset["passages"] += count
+                added += count
+                state["dataset"] = dataset
+                _write_state(args.home, state)     # after every file: a crash loses one at most
+                print(f"  {shown}: {count} passages")
+    except (grpc.RpcError, ReplicasOutOfSyncError) as err:
+        raise CliError(f"ingest stopped: {err}. Check `vsearch status`, then `vsearch repair`") from None
+    except ValueError as err:                      # bad --chunk-chars / --overlap
+        raise CliError(str(err)) from None
+    note = f", {unchanged} unchanged file(s) skipped" if unchanged else ""
+    print(f"ingested {added:,} passages in {time.perf_counter() - started:.1f}s{note}")
+    return 0
+
+
+def search(args):
+    state = _read_state(args.home)
+    dataset = state.get("dataset")
+    if not dataset:
+        raise CliError("nothing is ingested yet; run: vsearch ingest PATH")
+    if dataset["name"] != "documents":
+        raise CliError("this cluster holds GloVe words; use: vsearch similar WORD")
+
+    embedder = get_embedder(dataset["embedder"])   # the one the passages were embedded with
+    started = time.perf_counter()
+    query = embedder.embed_query(args.question)
+    embedded = time.perf_counter()
+    try:
+        with _coordinator(state) as coordinator:
+            hits = coordinator.search_hits(query, args.k)
+            failovers = coordinator.failovers
+    except ShardUnavailableError as err:
+        raise CliError(f"{err}; see: vsearch status") from None
+    finished = time.perf_counter()
+
+    print(f"passages closest to {args.question!r}:")
+    for rank, hit in enumerate(hits, start=1):
+        passage = hit.payload or {}
+        where = " > ".join(part for part in (passage.get("source"), passage.get("heading")) if part)
+        print(f"{rank:>3}. {1.0 - hit.distance:.3f}  {where}")
+        text = passage.get("text", "")
+        if args.full:
+            print(textwrap.indent(text, "     "))
+        else:
+            snippet = " ".join(text.split())
+            if len(snippet) > SNIPPET_CHARS:
+                snippet = snippet[:SNIPPET_CHARS].rsplit(" ", 1)[0] + " ..."
+            print(textwrap.fill(snippet, width=100, initial_indent="     ",
+                                subsequent_indent="     "))
+    note = f", {failovers} failover(s)" if failovers else ""
+    print(f"(embed {(embedded - started) * 1000:.1f} ms, search {(finished - embedded) * 1000:.1f} ms "
+          f"across {len(state['servers'])} shards{note})")
     return 0
 
 
@@ -331,6 +457,23 @@ def build_parser():
     finder.add_argument("word")
     finder.add_argument("-k", type=int, default=10)
     finder.set_defaults(run=similar)
+
+    ingester = commands.add_parser("ingest", help="split documents into passages and index them")
+    ingester.add_argument("paths", nargs="+", type=Path, metavar="PATH",
+                          help="files, or directories to search for .md/.txt/.rst files")
+    ingester.add_argument("--embedder", choices=sorted(EMBEDDERS),
+                          help=f"how text becomes vectors (default: {DEFAULT_EMBEDDER})")
+    ingester.add_argument("--chunk-chars", type=int, default=1000,
+                          help="longest passage, in characters")
+    ingester.add_argument("--overlap", type=int, default=150,
+                          help="characters shared by neighboring passages")
+    ingester.set_defaults(run=ingest)
+
+    searcher = commands.add_parser("search", help="passages closest in meaning to a question")
+    searcher.add_argument("question")
+    searcher.add_argument("-k", type=int, default=5)
+    searcher.add_argument("--full", action="store_true", help="print whole passages")
+    searcher.set_defaults(run=search)
     return parser
 
 
