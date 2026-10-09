@@ -14,8 +14,11 @@ differently (for example with a different instruction in front of a query).
 A collection must be searched with the embedder it was built with: vectors from two
 different embedders live in unrelated spaces, and distances between them mean nothing.
 """
+import os
 import re
+import sys
 import zlib
+from pathlib import Path
 
 import numpy as np
 
@@ -70,7 +73,61 @@ class HashingEmbedder:
         return self._embed(text)
 
 
-EMBEDDERS = {"hash": HashingEmbedder}
+class EmbedderUnavailable(RuntimeError):
+    """The embedder needs a package that is not installed."""
+
+
+def model_dir():
+    """Where downloaded models are kept. fastembed's own default is the system's temporary
+    directory, which the OS may empty; a model should be downloaded once."""
+    return Path(os.environ.get("VSEARCH_MODEL_DIR", Path.home() / ".cache" / "vsearch" / "models"))
+
+
+class FastEmbedEmbedder:
+    """A neural embedding model, run on this machine with ONNX Runtime (via fastembed).
+
+    Unlike HashingEmbedder it places texts with the same meaning close together even when
+    they share no words. The model is loaded on first use, and downloaded the first time
+    it is ever used.
+    """
+
+    def __init__(self, name, model_name, dim, download_mb):
+        self.name = name
+        self.model_name = model_name
+        self.dim = dim
+        self.download_mb = download_mb
+        self._model = None
+
+    def _load(self):
+        if self._model is None:
+            try:
+                from fastembed import TextEmbedding
+            except ImportError:
+                raise EmbedderUnavailable(
+                    f"the {self.name!r} embedder needs the fastembed package: "
+                    "pip install fastembed") from None
+            cache = model_dir()
+            if not cache.exists() or not any(cache.iterdir()):
+                print(f"first use: downloading {self.model_name} (about {self.download_mb} MB) "
+                      f"to {cache}", file=sys.stderr)
+            self._model = TextEmbedding(self.model_name, cache_dir=str(cache))
+        return self._model
+
+    def embed_documents(self, texts):
+        if not len(texts):
+            return np.zeros((0, self.dim), dtype=np.float32)
+        return np.stack(list(self._load().embed(list(texts)))).astype(np.float32, copy=False)
+
+    def embed_query(self, text):
+        return self.embed_documents([text])[0]
+
+
+EMBEDDERS = {
+    "hash": HashingEmbedder,
+    # 384 dimensions, reads up to 512 tokens of English text.
+    "bge-small": lambda: FastEmbedEmbedder("bge-small", "BAAI/bge-small-en-v1.5", dim=384,
+                                           download_mb=67),
+}
 
 
 def get_embedder(name):

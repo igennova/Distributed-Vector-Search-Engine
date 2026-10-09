@@ -5,3 +5,5 @@ protobuf>=7.35.1
 # generated files are reproducible; CI checks them against a fresh regeneration.
 grpcio-tools==1.84.0
 pytest
+# Optional, not installed in CI: `pip install fastembed` adds the local embedding model for
+# `vsearch ingest` and `vsearch search`. Without it, use `--embedder hash`.

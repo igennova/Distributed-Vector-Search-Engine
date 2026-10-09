@@ -31,12 +31,12 @@ import grpc
 from .client import (REPO_ROOT, GrpcCoordinator, ReplicasOutOfSyncError, ShardUnavailableError,
                      free_ports, server_command, wait_until_ready)
 from .dataset import load_glove
-from .embedding import EMBEDDERS, get_embedder
+from .embedding import EMBEDDERS, EmbedderUnavailable, get_embedder
 from .ingest import find_documents, fingerprint, ingest_passages, read_passages
 from .protos import shard_pb2, shard_pb2_grpc
 
 LOAD_BATCH = 10_000
-DEFAULT_EMBEDDER = "hash"
+DEFAULT_EMBEDDER = "bge-small"
 SNIPPET_CHARS = 240
 _spawned = []     # keep handles to servers started by this process until it exits
 
@@ -484,6 +484,10 @@ def main(argv=None):
         return args.run(args)
     except CliError as err:
         print(f"error: {err}", file=sys.stderr)
+        return 1
+    except EmbedderUnavailable as err:
+        print(f"error: {err} (or pick the built-in one: vsearch ingest --embedder hash)",
+              file=sys.stderr)
         return 1
 
 

@@ -9,6 +9,9 @@ description = "A distributed approximate-nearest-neighbor vector search engine b
 requires-python = ">=3.10"
 dependencies = ["numpy", "grpcio>=1.84.0", "protobuf>=7.35.1"]
 
+[project.optional-dependencies]
+embed = ["fastembed>=0.9"]     # the local embedding model behind `vsearch ingest` / `search`
+
 [project.scripts]
 vsearch = "vsearch.cli:main"
 

@@ -1,4 +1,6 @@
 """End-to-end tests of the command line, against a tiny stand-in for the GloVe data."""
+import sys
+
 import numpy as np
 import pytest
 
@@ -105,7 +107,7 @@ def test_ingest_and_search_documents(tmp_path, glove_dir, capsys, monkeypatch):
         assert run(home, "search", question) == 1          # nothing ingested
         assert "vsearch ingest" in capsys.readouterr().err
 
-        assert run(home, "ingest", "docs") == 0
+        assert run(home, "ingest", "docs", "--embedder", "hash") == 0
         assert "ingested 3 passages" in capsys.readouterr().out
         assert run(home, "search", question, "-k", "2") == 0
         output = capsys.readouterr().out
@@ -114,7 +116,9 @@ def test_ingest_and_search_documents(tmp_path, glove_dir, capsys, monkeypatch):
 
         # The same files again add nothing; a changed file is reported, not duplicated.
         assert run(home, "ingest", "docs") == 0
-        assert "ingested 0 passages" in capsys.readouterr().out
+        output = capsys.readouterr().out
+        assert "ingested 0 passages" in output and "2 unchanged file(s) skipped" in output
+        assert "changed since" not in output
         (docs / "notes.txt").write_text("Something new.\n")
         (docs / "more.md").write_text("# Sharding\n\nVectors are spread over shards by id.\n")
         assert run(home, "ingest", "docs") == 0
@@ -122,6 +126,10 @@ def test_ingest_and_search_documents(tmp_path, glove_dir, capsys, monkeypatch):
         assert "notes.txt: changed" in output and "ingested 1 passages" in output
         assert run(home, "status") == 0
         assert "ingested: 4 passages from 3 file(s)" in capsys.readouterr().out
+
+        # Every passage in a cluster has to come from the same embedder.
+        assert run(home, "ingest", "docs", "--embedder", "bge-small") == 1
+        assert "'hash' embedder" in capsys.readouterr().err
 
         # Words and documents do not mix in one cluster.
         assert run(home, "similar", "w5") == 1
@@ -148,8 +156,23 @@ def test_documents_cannot_be_ingested_into_a_word_cluster(tmp_path, glove_dir, c
     try:
         assert run(home, "cluster", "up", "--shards", "1", "--replicas", "1") == 0
         assert run(home, "load", "glove", "--limit", "50", "--glove-dir", str(glove_dir)) == 0
-        assert run(home, "ingest", str(tmp_path / "a.md")) == 1
+        assert run(home, "ingest", str(tmp_path / "a.md"), "--embedder", "hash") == 1
         assert run(home, "search", "text") == 1
         assert "vsearch similar" in capsys.readouterr().err
+    finally:
+        run(home, "cluster", "down", "--wipe")
+
+
+def test_a_missing_embedding_package_is_explained(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "cluster"
+    (tmp_path / "a.md").write_text("Some text.\n")
+    monkeypatch.setitem(sys.modules, "fastembed", None)      # makes `import fastembed` fail
+    try:
+        assert run(home, "cluster", "up", "--shards", "1", "--replicas", "1") == 0
+        assert run(home, "ingest", str(tmp_path / "a.md")) == 1     # the default embedder
+        error = capsys.readouterr().err
+        assert "pip install fastembed" in error and "--embedder hash" in error
+        assert run(home, "status") == 0
+        assert "ingested" not in capsys.readouterr().out            # nothing was recorded
     finally:
         run(home, "cluster", "down", "--wipe")
