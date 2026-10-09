@@ -54,30 +54,65 @@ def _sections(lines, headings):
 
 
 def _blocks(lines):
-    """Yield (is_prose, lines) for each paragraph, list, table, or fenced code block."""
+    """Yield (kind, lines) for each block; kind is "prose", "lines" (a list, table, or
+    quote), or "code" (a fenced block)."""
     block, fence = [], None
     for line in lines:
         marker = _FENCE.match(line)
         if fence is not None:                      # inside code: keep every line, even blank
             block.append(line.rstrip())
             if marker and marker.group(1) == fence:
-                yield False, block
+                yield "code", block
                 block, fence = [], None
         elif marker:
             if block:
-                yield _is_prose(block), block
+                yield _kind(block), block
             block, fence = [line.rstrip()], marker.group(1)
         elif line.strip():
             block.append(line.rstrip())
         elif block:
-            yield _is_prose(block), block
+            yield _kind(block), block
             block = []
     if block:
-        yield fence is None and _is_prose(block), block
+        yield ("code" if fence is not None else _kind(block)), block
 
 
-def _is_prose(block):
-    return not any(_LINE_STRUCTURED.match(line) for line in block)
+def _kind(block):
+    return "lines" if any(_LINE_STRUCTURED.match(line) for line in block) else "prose"
+
+
+def _sentences(text):
+    return _SENTENCE_END.split(text)
+
+
+def _pieces(kind, block, max_chars):
+    """Yield (joiner, text) for each piece a passage may start or end at; the joiner is what
+    attaches the piece to the one before it.
+
+    prose: one piece per sentence
+    code:  one piece per line
+    lines: one piece per list item or table row. An item wrapped over several lines is put
+           back together first, so a passage does not start in the middle of it; an item too
+           long for one passage is cut into sentences.
+    """
+    if kind == "code":
+        yield from (("\n", line) for line in block)
+    elif kind == "prose":
+        yield from ((" ", sentence) for sentence in _sentences(" ".join(l.strip() for l in block)))
+    else:
+        items = []
+        for line in block:
+            if items and not _LINE_STRUCTURED.match(line):
+                items[-1] += " " + line.strip()        # continuation of the item above
+            else:
+                items.append(line)
+        for item in items:
+            if len(item) <= max_chars:
+                yield "\n", item
+            else:
+                first, *rest = _sentences(item)
+                yield "\n", first
+                yield from ((" ", sentence) for sentence in rest)
 
 
 def _hard_split(text, max_chars):
@@ -93,19 +128,16 @@ def _hard_split(text, max_chars):
 
 
 def _units(lines, max_chars):
-    """Yield (separator, text) for each piece a passage may start or end at: a sentence of
-    prose, or a line of a list, table, or code block. The separator is what joins the piece
-    to the one before it."""
-    for is_prose, block in _blocks(lines):
-        if is_prose:
-            pieces, joiner = _SENTENCE_END.split(" ".join(line.strip() for line in block)), " "
-        else:
-            pieces, joiner = block, "\n"
+    """Yield (separator, text) units for one section, each at most max_chars long."""
+    for kind, block in _blocks(lines):
         separator = "\n\n"                         # a blank line between blocks
-        for piece in pieces:
+        for joiner, piece in _pieces(kind, block, max_chars):
+            if separator is None:
+                separator = joiner
             for part in ([piece] if len(piece) <= max_chars else _hard_split(piece, max_chars)):
                 yield separator, part
-                separator = joiner
+                separator = " "
+            separator = None
 
 
 def _length(units):

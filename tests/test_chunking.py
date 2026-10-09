@@ -59,6 +59,24 @@ def test_lists_keep_one_item_per_line():
     assert "- first item\n- second item" in chunk_document(DOC)[2].text
 
 
+def test_a_wrapped_list_item_is_never_cut_in_the_middle():
+    items = [f"- Item {i} starts here and is long enough that its text\n  wraps onto a second line, "
+             f"ending with word{i}." for i in range(30)]
+    chunks = chunk_document("\n".join(items), max_chars=400, overlap=0)
+    assert len(chunks) > 5
+    for chunk in chunks:
+        lines = chunk.text.split("\n")
+        assert all(line.startswith("- Item") and line.endswith(".") for line in lines)
+    assert "is long enough that its text wraps onto a second line" in chunks[0].text
+
+
+def test_a_list_item_longer_than_a_passage_is_cut_between_sentences():
+    item = "- " + " ".join(f"Point {i} of a very long item." for i in range(40))
+    chunks = chunk_document(item, max_chars=300, overlap=0)
+    assert len(chunks) > 3
+    assert all(chunk.text.endswith("item.") for chunk in chunks)
+
+
 def test_plain_text_has_no_headings():
     chunks = chunk_document("# just a line\n\nSome text.", headings=False)
     assert [c.heading for c in chunks] == [""]
