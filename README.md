@@ -24,6 +24,7 @@ and merges the results.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .          # adds the `vsearch` command
+pip install fastembed     # optional: the embedding model used to search documents
 ```
 
 ## Quick start
@@ -71,6 +72,35 @@ $ vsearch cluster down                            # data stays on disk; `cluster
 The cluster's state, data, and logs live in `data/cluster` (change it with `--home`).
 `vsearch cluster down --wipe` deletes them.
 
+### Search your own documents
+
+`vsearch ingest` splits documents into passages, embeds each one, and stores the vector with the
+passage as its payload. `vsearch search` embeds the question the same way and returns the
+closest passages. Here the engine indexes its own documentation:
+
+```console
+$ vsearch --home data/docs cluster up --shards 2 --replicas 2
+$ vsearch --home data/docs ingest README.md DECISIONS.md
+  DECISIONS.md: 34 passages
+  README.md: 28 passages
+ingested 62 passages in 3.1s
+$ vsearch --home data/docs search "what happens if the computer loses power"
+passages closest to 'what happens if the computer loses power':
+  1. 0.633  DECISIONS.md > Durability: snapshots + write-ahead log
+     F_FULLFSYNC does, and costs ~3.4 ms per append, about 150x more. So `--fsync always` here
+     survives a process or OS crash, but not necessarily a power cut. ...
+(embed 380.4 ms, search 3.1 ms across 2 shards)
+```
+
+The embedding model places texts with similar meaning close together, so a question does not
+have to use the document's own words. The model is [bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5)
+(384 dimensions), run locally with ONNX Runtime: no API key, and nothing leaves the machine. It
+is downloaded once (about 67 MB) to `~/.cache/vsearch/models`. Without fastembed installed,
+`--embedder hash` uses a built-in embedder that matches on shared words instead.
+
+Ingesting the same files again adds nothing: each file's content hash is recorded, and unchanged
+files are skipped.
+
 ## Project layout
 
 ```
@@ -82,6 +112,9 @@ vsearch/            the engine
   server.py           one shard served over gRPC, plus replica catch-up
   storage.py          snapshots + write-ahead log, so a shard survives restarts
   client.py           gRPC coordinator (replication, failover, repair) + local cluster launcher
+  chunking.py         split a document into passages along headings and sentences
+  embedding.py        text -> vector: a local embedding model, or word hashing
+  ingest.py           files -> passages -> vectors with payloads
   cli.py              the `vsearch` command
   protos/shard.proto  the gRPC contract (Add, Search)
 scripts/            gen_protos.sh regenerates the gRPC code from the .proto
@@ -378,7 +411,7 @@ log. Run it with `python -m benchmarks.bench_resync`.
 - [x] Real-data benchmarks: GloVe word vectors up to 400k, diversity heuristic for links
 - [x] Command-line interface (`vsearch`)
 - [x] Payloads: data stored with each vector and returned with search results
-- [ ] Text ingestion: chunk documents and embed them
+- [x] Text ingestion: chunk documents, embed them locally, search by question
 - [ ] Metadata filtering and namespaces
 - [ ] MCP server, agent memory, and a self-healing operations agent
 - [ ] Evaluations for retrieval and agent behavior

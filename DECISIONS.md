@@ -1,10 +1,10 @@
-## Phase 0 — brute-force baseline
+## Brute-force baseline
 - Metric: cosine similarity (direction, magnitude-independent) over raw dot product.
 - Bug caught: unit tests passed but benchmark recall was 0.734 — I'd implemented
   dot product, not cosine. Tiny tests used unit vectors (where they're identical);
   only the benchmark's varied magnitudes exposed it.
 - Baseline @ 10k vectors: recall 1.000, p50 12ms, 80 QPS. Scales linearly →
-  the motivation for an ANN index in Phase 1.
+  the motivation for an ANN index.
 
 ## HNSW index (graph-based ANN)
 - Structure: hierarchical navigable small-world graph. Search greedily descends the
@@ -343,3 +343,64 @@
   (node, query) distance can differ by one ulp between two searches that reach the node in
   different batches. Identical replicas walk identical paths and still agree exactly.
 - Benchmarks were unaffected by the fix (same recall at every ef_search).
+
+## Text ingestion
+- The pipeline is file → passages → vectors → shards, and each vector's payload is its passage
+  (`text`, `source`, `heading`, `chunk`). Nothing below the coordinator changed: a shard still
+  stores vectors and opaque payload text.
+- Why split at all: an embedding model reads a fixed number of tokens (512 for this one) and
+  silently ignores the rest, and one vector for a whole document blurs every topic in it
+  together. Passages are at most 1000 characters, roughly 250 tokens, well inside the limit.
+- Where to cut: first at Markdown headings, so a passage never mixes two sections, then
+  between sentences, list items, table rows, or lines of code, never inside one. A list item
+  wrapped over several lines is put back together before packing; the first version cut at
+  line breaks and produced passages starting mid-sentence, visible as soon as real results
+  were printed.
+- Neighboring passages of a section share up to 150 characters, so a fact that sits on a
+  boundary is whole in one of them. Overlap never crosses a heading.
+- The headings above a passage are embedded with it ("Storage > Snapshots" + text). A passage
+  often never names the thing it is about; its headings do.
+- Embedders share a small interface (`embed_documents`, `embed_query`, `dim`, `name`), with
+  two implementations. `bge-small` is a neural model run locally through fastembed and ONNX
+  Runtime: no API key, no network after the first download, no PyTorch. `hash` is feature
+  hashing of words (crc32, because Python's `hash()` of a string changes per process and a
+  stored vector has to match its text after a restart; a test runs a second interpreter to
+  check). It needs nothing installed, so the whole pipeline is tested in CI without a model.
+- A cluster records which embedder built it, and search always uses that one. Vectors from
+  two embedders live in unrelated spaces, so ingesting with a different one is refused, as is
+  mixing documents into a cluster of GloVe words.
+- A small check, not an evaluation: 14 hand-written questions about this repository's two
+  documents, each phrased differently from the text, scored by whether the right section came
+  back.
+
+  | Embedder | right section first | in the top 3 |
+  |----------|---------------------|--------------|
+  | `hash` (shared words) | 6 / 14 | 10 / 14 |
+  | `bge-small`           | 8 / 14 | 10 / 14 |
+
+  The model is ahead at rank 1 and level in the top 3. With 14 questions written by the
+  author, two questions of difference is not evidence of much; it does show a neural model is
+  not automatically far ahead of word matching on technical text full of rare terms. Embedding
+  the headings helped the model at every passage size tried (right section first: 7–9 with
+  headings, 4–6 without, at 300, 500, and 1000 characters). The query instruction the model's
+  authors suggest for short questions made no measurable difference (8 vs 8 first, 11 vs 10 in
+  the top 3), so it is not used. A proper evaluation set comes later.
+- Scores are not comparable between embedders: `bge-small` gives unrelated texts 0.4 to 0.5
+  and related ones 0.65 and up, while `hash` gives unrelated texts about 0. Only the order
+  matters.
+- Where the time goes for one `vsearch search`: about 380 ms to import the library and load
+  the model, about 3 ms for the search across the shards. Each command is a new process, so
+  it pays the load every time; a long-running service would pay it once (embedding a query
+  with the model already loaded takes about 2 ms). Ingestion embeds about 20 passages a
+  second on a laptop CPU.
+- Ingestion records each file's SHA-256 in `cluster.json` after the file is stored. Unchanged
+  files are skipped, so `ingest` can be run again safely.
+- Each check was verified by removing it in a copy of the code and confirming a test fails:
+  the embedder match, the words-versus-documents check, the unchanged-file skip, the size
+  limit, the overlap, headings inside code blocks, and crc32 in place of `hash()`. The test
+  for the unchanged-file skip passed without the skip at first (the changed-file branch
+  produced the same "0 passages" line) and was tightened.
+- Not done: the index has no delete, so a changed file is reported and skipped instead of
+  replaced. A crash in the middle of a file can leave some of its passages stored without the
+  file being recorded, and a re-run would add them again; fixing both needs deletes or
+  idempotent writes. Only Markdown and plain text are read (no PDF or HTML).
