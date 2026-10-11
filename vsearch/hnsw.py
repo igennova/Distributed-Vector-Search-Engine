@@ -149,6 +149,43 @@ class HNSW:
 
         return [(-neg_dist, node_id) for neg_dist, node_id in results]
 
+    def _search_layer_filtered(self, query, entry, ef, allowed):
+        """
+        Beam search of layer 0 that returns only allowed nodes. `allowed` is a boolean array
+        with one entry per node.
+
+        The walk still goes through nodes that are not allowed: they are the roads that lead
+        to the allowed ones, and skipping them would cut the graph into pieces. Only the
+        result set is restricted. It keeps going until it holds ef allowed nodes, so the
+        fewer nodes are allowed, the further it has to walk.
+        """
+        d_entry = float(1.0 - self._data[entry] @ query)
+        visited = {entry}
+        candidates = [(d_entry, entry)]
+        results = [(-d_entry, entry)] if allowed[entry] else []
+        adjacency = self.graph[0]
+
+        while candidates:
+            dist_c, c = heapq.heappop(candidates)
+            if len(results) >= ef and dist_c > -results[0][0]:
+                break
+
+            fresh = [n for n in adjacency[c] if n not in visited]
+            if not fresh:
+                continue
+            visited.update(fresh)
+            dists = 1.0 - self._data[fresh] @ query
+
+            for neighbor, d, ok in zip(fresh, dists.tolist(), allowed[fresh].tolist()):
+                if len(results) < ef or d < -results[0][0]:
+                    heapq.heappush(candidates, (d, neighbor))
+                    if ok:
+                        heapq.heappush(results, (-d, neighbor))
+                        if len(results) > ef:
+                            heapq.heappop(results)
+
+        return [(-neg_dist, node_id) for neg_dist, node_id in results]
+
     def _search_layer(self, query, entry, layer, ef):
         """Like _search_layer_with_distances, but returns only the node ids."""
         return [node_id for _, node_id in self._search_layer_with_distances(query, entry, layer, ef)]
@@ -240,16 +277,33 @@ class HNSW:
             self.insert(v)
         return self
 
-    def search_with_distances(self, query, k=10):
-        """Return the approximate k nearest neighbors as (distance, id) pairs, closest first."""
+    def search_with_distances(self, query, k=10, allowed=None):
+        """Return the approximate k nearest neighbors as (distance, id) pairs, closest first.
+        With `allowed` (a boolean array, one entry per node), only those nodes are returned."""
         if self.entry_point is None:                      # empty index
             return []
         query = _normalize(np.asarray(query, dtype=np.float32))
         entry = self.entry_point
         for layer in range(self.top_layer, 0, -1):        # descend the sparse upper layers
             entry = self._greedy_descend(query, entry, layer)
-        scored = self._search_layer_with_distances(query, entry, 0, self.ef_search)
+        if allowed is None:
+            scored = self._search_layer_with_distances(query, entry, 0, self.ef_search)
+        else:
+            scored = self._search_layer_filtered(query, entry, max(self.ef_search, k), allowed)
         return sorted(scored)[:k]
+
+    def exact_among(self, query, node_ids, k=10):
+        """The exact k nearest of the given nodes, as (distance, id) pairs, closest first:
+        compare the query with every one of them. No graph, so nothing is missed."""
+        if len(node_ids) == 0:
+            return []
+        query = _normalize(np.asarray(query, dtype=np.float32))
+        node_ids = np.asarray(node_ids)
+        dists = 1.0 - self._data[node_ids] @ query
+        if len(dists) > k:
+            nearest = np.argpartition(dists, k)[:k]
+            node_ids, dists = node_ids[nearest], dists[nearest]
+        return sorted(zip(dists.tolist(), node_ids.tolist()))[:k]
 
     def search(self, query, k=10):
         """Return the ids of the approximate k nearest neighbors of query."""
