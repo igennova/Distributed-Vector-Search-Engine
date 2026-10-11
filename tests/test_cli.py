@@ -176,3 +176,48 @@ def test_a_missing_embedding_package_is_explained(tmp_path, capsys, monkeypatch)
         assert "ingested" not in capsys.readouterr().out            # nothing was recorded
     finally:
         run(home, "cluster", "down", "--wipe")
+
+
+def test_namespaces_and_filters_on_the_command_line(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "cluster"
+    for user, text in [("alice", "Alice keeps notes about sharding.\n"),
+                       ("bob", "Bob keeps notes about sharding too.\n")]:
+        (tmp_path / user).mkdir()
+        (tmp_path / user / "notes.md").write_text(f"# Notes\n\n{text}")
+        (tmp_path / user / "other.md").write_text("# Other\n\nSomething about sharding, again.\n")
+    monkeypatch.chdir(tmp_path)
+    try:
+        assert run(home, "cluster", "up", "--shards", "4", "--replicas", "1") == 0
+        assert run(home, "ingest", "alice", "--embedder", "hash", "--namespace", "alice") == 0
+        assert "into namespace 'alice' (shard 3 of 4)" in capsys.readouterr().out
+        assert run(home, "ingest", "bob", "--namespace", "bob") == 0
+        # The same files can go into a second namespace; within one they are still skipped.
+        assert run(home, "ingest", "alice", "--namespace", "bob") == 0
+        assert "ingested 2 passages" in capsys.readouterr().out
+        assert run(home, "ingest", "alice", "--namespace", "bob") == 0
+        assert "ingested 0 passages" in capsys.readouterr().out
+
+        assert run(home, "search", "notes about sharding", "--namespace", "alice") == 0
+        output = capsys.readouterr().out
+        assert set(result_sources(output)) == {"alice/notes.md > Notes", "alice/other.md > Other"}
+        assert "on shard 3 of 4" in output
+
+        assert run(home, "search", "notes about sharding", "-k", "10") == 0     # everything
+        output = capsys.readouterr().out
+        assert len(result_sources(output)) == 6 and "across 4 shards" in output
+
+        assert run(home, "search", "sharding", "--namespace", "bob",
+                   "--where", "source=bob/notes.md", "--where", "source=alice/notes.md") == 0
+        assert sorted(result_sources(capsys.readouterr().out)) == [
+            "alice/notes.md > Notes", "bob/notes.md > Notes"]
+        assert run(home, "search", "sharding", "--where", "chunk=0", "--where", "heading=Other") == 0
+        assert len(result_sources(capsys.readouterr().out)) == 3
+
+        assert run(home, "search", "sharding", "--namespace", "nobody") == 0
+        assert "nothing matches" in capsys.readouterr().out
+        assert run(home, "search", "sharding", "--where", "source") == 1        # no value
+        assert run(home, "search", "sharding", "--where", "chunk=1.5") == 0     # text, matches nothing
+        assert run(home, "status") == 0
+        assert "6 passages from 6 file(s) in 2 namespace(s)" in capsys.readouterr().out
+    finally:
+        run(home, "cluster", "down", "--wipe")

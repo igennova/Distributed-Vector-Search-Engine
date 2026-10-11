@@ -60,17 +60,19 @@ def embedding_text(passage):
     return passage["text"]
 
 
-def ingest_passages(coordinator, embedder, passages, batch=EMBED_BATCH):
+def ingest_passages(coordinator, embedder, passages, batch=EMBED_BATCH, namespace=None):
     """Embed the passages and store each vector with its passage as the payload."""
     if not passages:
         return 0
     texts = [embedding_text(passage) for passage in passages]
     vectors = np.concatenate([embedder.embed_documents(texts[start:start + batch])
                               for start in range(0, len(texts), batch)])
-    coordinator.add(vectors, passages)
+    coordinator.add(vectors, passages, namespace=namespace)
     return len(passages)
 
 
-def search_passages(coordinator, embedder, question, k=5):
-    """The k passages closest to the question, as Hits whose payload is the passage."""
-    return coordinator.search_hits(embedder.embed_query(question), k)
+def search_passages(coordinator, embedder, question, k=5, where=None, namespace=None):
+    """The k passages closest to the question, as Hits whose payload is the passage.
+    `where` filters on passage fields, e.g. {"source": "docs/guide.md"}."""
+    return coordinator.search_hits(embedder.embed_query(question), k, where=where,
+                                   namespace=namespace)

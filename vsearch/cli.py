@@ -6,6 +6,9 @@ Command-line interface for running and querying a local cluster.
     vsearch similar king                          nearest words, with their similarity
     vsearch ingest docs/ README.md                split documents into passages and index them
     vsearch search "how does recovery work?"      the passages closest to a question
+    vsearch search "..." --where source=README.md   only passages whose fields match
+    vsearch ingest notes/ --namespace alice       keep one user's documents apart, on one shard
+    vsearch search "..." --namespace alice        search only that user's documents
     vsearch status                                state, size, and write position of every server
     vsearch cluster kill 0 1                      crash shard 0's replica 1
     vsearch cluster restart 0 1                   start it again (it recovers from disk)
@@ -30,6 +33,7 @@ import grpc
 
 from .client import (REPO_ROOT, GrpcCoordinator, ReplicasOutOfSyncError, ShardUnavailableError,
                      free_ports, server_command, wait_until_ready)
+from .cluster import shard_for_namespace
 from .dataset import load_glove
 from .embedding import EMBEDDERS, EmbedderUnavailable, get_embedder
 from .ingest import find_documents, fingerprint, ingest_passages, read_passages
@@ -218,8 +222,10 @@ def status(args):
                   f"{reply.last_seq:>10}{reply.snapshot_seq:>14}")
     dataset = state.get("dataset")
     if dataset and dataset["name"] == "documents":
+        namespaces = {source.get("namespace") for source in dataset["sources"].values()} - {None}
+        spaces = f" in {len(namespaces)} namespace(s)" if namespaces else ""
         print(f"ingested: {dataset['passages']:,} passages from {len(dataset['sources'])} "
-              f"file(s), embedder: {dataset['embedder']}")
+              f"file(s){spaces}, embedder: {dataset['embedder']}")
     elif dataset:
         print(f"loaded: the {dataset['limit']:,} most frequent {dataset['name']} words")
     return 0
@@ -331,7 +337,9 @@ def ingest(args):
         with _coordinator(state) as coordinator:
             for path in files:
                 shown, digest = _display_path(path), fingerprint(path)
-                known = dataset["sources"].get(str(path))
+                # The same file can be ingested into several namespaces, once each.
+                key = f"{args.namespace}::{path}" if args.namespace else str(path)
+                known = dataset["sources"].get(key)
                 if known and known["sha256"] == digest:
                     unchanged += 1
                     continue
@@ -342,8 +350,10 @@ def ingest(args):
                     continue
                 passages = read_passages(path, source=shown, max_chars=args.chunk_chars,
                                          overlap=args.overlap)
-                count = ingest_passages(coordinator, embedder, passages)
-                dataset["sources"][str(path)] = {"sha256": digest, "passages": count}
+                count = ingest_passages(coordinator, embedder, passages,
+                                        namespace=args.namespace)
+                dataset["sources"][key] = {"sha256": digest, "passages": count,
+                                           "namespace": args.namespace}
                 dataset["passages"] += count
                 added += count
                 state["dataset"] = dataset
@@ -351,11 +361,35 @@ def ingest(args):
                 print(f"  {shown}: {count} passages")
     except (grpc.RpcError, ReplicasOutOfSyncError) as err:
         raise CliError(f"ingest stopped: {err}. Check `vsearch status`, then `vsearch repair`") from None
-    except ValueError as err:                      # bad --chunk-chars / --overlap
+    except ValueError as err:                      # bad --chunk-chars, --overlap, --namespace
         raise CliError(str(err)) from None
     note = f", {unchanged} unchanged file(s) skipped" if unchanged else ""
-    print(f"ingested {added:,} passages in {time.perf_counter() - started:.1f}s{note}")
+    into = ""
+    if args.namespace:
+        shards = len(state["servers"])
+        into = (f" into namespace {args.namespace!r} "
+                f"(shard {shard_for_namespace(args.namespace, shards)} of {shards})")
+    print(f"ingested {added:,} passages{into} in {time.perf_counter() - started:.1f}s{note}")
     return 0
+
+
+def _parse_where(items):
+    """--where FIELD=VALUE options as a filter. A value that reads as a JSON integer or
+    boolean is taken as one (chunk=3, done=true); anything else is text. To match text
+    that looks like a number, quote it: year='"2024"'."""
+    where = {}
+    for item in items or []:
+        field, equals, raw = item.partition("=")
+        if not field or not equals:
+            raise CliError(f"--where takes FIELD=VALUE, got {item!r}")
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            value = raw
+        if not isinstance(value, (str, int)):      # a float, null, a list: keep the text
+            value = raw
+        where.setdefault(field, []).append(value)
+    return where
 
 
 def search(args):
@@ -366,19 +400,24 @@ def search(args):
     if dataset["name"] != "documents":
         raise CliError("this cluster holds GloVe words; use: vsearch similar WORD")
 
+    where = _parse_where(args.where)
     embedder = get_embedder(dataset["embedder"])   # the one the passages were embedded with
     started = time.perf_counter()
     query = embedder.embed_query(args.question)
     embedded = time.perf_counter()
     try:
         with _coordinator(state) as coordinator:
-            hits = coordinator.search_hits(query, args.k)
+            hits = coordinator.search_hits(query, args.k, where=where, namespace=args.namespace)
             failovers = coordinator.failovers
     except ShardUnavailableError as err:
         raise CliError(f"{err}; see: vsearch status") from None
+    except ValueError as err:                      # a filter the index cannot answer
+        raise CliError(str(err)) from None
     finished = time.perf_counter()
 
     print(f"passages closest to {args.question!r}:")
+    if not hits:
+        print("  (nothing matches)")
     for rank, hit in enumerate(hits, start=1):
         passage = hit.payload or {}
         where = " > ".join(part for part in (passage.get("source"), passage.get("heading")) if part)
@@ -393,8 +432,11 @@ def search(args):
             print(textwrap.fill(snippet, width=100, initial_indent="     ",
                                 subsequent_indent="     "))
     note = f", {failovers} failover(s)" if failovers else ""
+    shards = len(state["servers"])
+    asked = (f"on shard {shard_for_namespace(args.namespace, shards)} of {shards}"
+             if args.namespace else f"across {shards} shards")
     print(f"(embed {(embedded - started) * 1000:.1f} ms, search {(finished - embedded) * 1000:.1f} ms "
-          f"across {len(state['servers'])} shards{note})")
+          f"{asked}{note})")
     return 0
 
 
@@ -467,12 +509,18 @@ def build_parser():
                           help="longest passage, in characters")
     ingester.add_argument("--overlap", type=int, default=150,
                           help="characters shared by neighboring passages")
+    ingester.add_argument("--namespace", help="keep these documents apart under this name; "
+                          "all of a namespace is stored on one shard")
     ingester.set_defaults(run=ingest)
 
     searcher = commands.add_parser("search", help="passages closest in meaning to a question")
     searcher.add_argument("question")
     searcher.add_argument("-k", type=int, default=5)
     searcher.add_argument("--full", action="store_true", help="print whole passages")
+    searcher.add_argument("--namespace", help="search only inside this namespace")
+    searcher.add_argument("--where", action="append", metavar="FIELD=VALUE",
+                          help="only passages whose field has this value, e.g. "
+                               "source=README.md; repeat a field to accept several values")
     searcher.set_defaults(run=search)
     return parser
 
