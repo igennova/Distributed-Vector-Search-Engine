@@ -65,6 +65,7 @@ class ShardServicer(shard_pb2_grpc.ShardServiceServicer):
         with self.lock:
             return shard_pb2.StatusResponse(
                 size=len(self.shard), durable=self.durable,
+                next_global_id=self.shard.next_global_id,
                 last_seq=self.shard.last_seq if self.durable else 0,
                 snapshot_seq=self.shard.snapshot_seq if self.durable else 0)
 

@@ -54,6 +54,7 @@ message StatusResponse {
   bool durable = 2;            // false for in-memory shards, which don't number their writes
   uint64 last_seq = 3;         // last write this replica has applied
   uint64 snapshot_seq = 4;     // last write covered by its snapshot; its log holds only later ones
+  int64 next_global_id = 5;    // one more than the largest global id stored here (0 if empty)
 }
 
 message FetchLogRequest {

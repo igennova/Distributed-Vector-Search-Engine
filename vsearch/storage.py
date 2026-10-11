@@ -323,6 +323,10 @@ class DurableShard:
     def search_with_payloads(self, query, k):
         return self.shard.search_with_payloads(query, k)
 
+    @property
+    def next_global_id(self):
+        return self.shard.next_global_id
+
     def __len__(self):
         return len(self.shard)
 

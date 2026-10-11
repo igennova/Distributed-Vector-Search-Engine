@@ -68,3 +68,18 @@ def test_shards_as_separate_processes():
             GrpcCoordinator(cluster.addresses) as remote:
         remote.add(data)
         assert remote.search(query, 5) == local.search(query, 5)
+
+
+def test_a_new_coordinator_continues_the_ids(shard_addresses):
+    # Every command-line call builds a new coordinator, so ids must carry on from what the
+    # cluster already holds, not start again at 0.
+    rng = np.random.default_rng(5)
+    first, second = rng.standard_normal((2, 30, 16)).astype(np.float32)
+    with GrpcCoordinator(shard_addresses) as one:
+        one.add(first)
+    with GrpcCoordinator(shard_addresses) as two:
+        two.add(second[:7])
+        two.add(second[7:])
+        assert two.size == 60
+        assert two.search(second[3], 1) == [33]
+        assert sorted(two.search(first[0], 60)) == list(range(60))    # 60 different ids

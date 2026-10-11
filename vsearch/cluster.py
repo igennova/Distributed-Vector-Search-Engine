@@ -108,6 +108,11 @@ class Shard:
         return [(dist, self.global_ids[local_id], self.payloads[local_id])
                 for dist, local_id in self.index.search_with_distances(query, k)]
 
+    @property
+    def next_global_id(self):
+        """One more than the largest global id stored here: the first id that is still free."""
+        return max(self.global_ids, default=-1) + 1
+
     def __len__(self):
         return len(self.global_ids)
 

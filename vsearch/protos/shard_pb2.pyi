@@ -57,16 +57,18 @@ class StatusRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class StatusResponse(_message.Message):
-    __slots__ = ("size", "durable", "last_seq", "snapshot_seq")
+    __slots__ = ("size", "durable", "last_seq", "snapshot_seq", "next_global_id")
     SIZE_FIELD_NUMBER: _ClassVar[int]
     DURABLE_FIELD_NUMBER: _ClassVar[int]
     LAST_SEQ_FIELD_NUMBER: _ClassVar[int]
     SNAPSHOT_SEQ_FIELD_NUMBER: _ClassVar[int]
+    NEXT_GLOBAL_ID_FIELD_NUMBER: _ClassVar[int]
     size: int
     durable: bool
     last_seq: int
     snapshot_seq: int
-    def __init__(self, size: _Optional[int] = ..., durable: _Optional[bool] = ..., last_seq: _Optional[int] = ..., snapshot_seq: _Optional[int] = ...) -> None: ...
+    next_global_id: int
+    def __init__(self, size: _Optional[int] = ..., durable: _Optional[bool] = ..., last_seq: _Optional[int] = ..., snapshot_seq: _Optional[int] = ..., next_global_id: _Optional[int] = ...) -> None: ...
 
 class FetchLogRequest(_message.Message):
     __slots__ = ("after_seq",)

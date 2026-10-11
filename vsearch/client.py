@@ -81,7 +81,7 @@ class GrpcCoordinator:
         self.timeout = timeout            # per-search deadline: a stuck server can't hang a query
         self.add_timeout = add_timeout    # inserts build graph, so they get a longer deadline
         self.retry_after = retry_after    # seconds a failed replica is deprioritized
-        self.size = 0
+        self.size = 0                     # next free global id; learned from the servers
         self.shard_sizes = [0] * len(self.replicas)   # as reported back by the servers
         self.failovers = 0                            # searches retried on another replica
         self._next_replica = [0] * len(self.replicas) # round-robin position per shard
@@ -93,7 +93,7 @@ class GrpcCoordinator:
         if len(vectors) == 0:
             return self
         encoded = encode_payloads(payloads, len(vectors))
-        self._check_seqs()
+        self._check_shards()
         dim = vectors.shape[1]
         # Payloads share the request with their vectors, so leave room for the largest one.
         largest_payload = max(len(text.encode("utf-8")) for text in encoded)
@@ -141,14 +141,22 @@ class GrpcCoordinator:
                     self._last_seqs[shard] += 1
         return self
 
-    def _check_seqs(self):
-        """Learn each shard's last write seq. Its replicas must agree on it before new writes,
-        otherwise a write would land on top of different histories."""
+    def _check_shards(self):
+        """Ask the shards where they are before writing to them.
+
+        Learns the next free global id: the shards may already hold vectors written by an
+        earlier coordinator, and ids must carry on from there. Also learns each shard's last
+        write seq; its replicas must agree on it before new writes, otherwise a write would
+        land on top of different histories.
+        """
         for shard, group in enumerate(self.replicas):
             if self._last_seqs[shard] is not None:
                 continue
             statuses = [replica.stub.Status(shard_pb2.StatusRequest(), timeout=self.timeout)
                         for replica in group]
+            # The largest id in use, not a count: after a write that reached only some
+            # shards, a count would hand out ids that are already taken.
+            self.size = max([self.size] + [status.next_global_id for status in statuses])
             if not all(status.durable for status in statuses):
                 self._last_seqs[shard] = _UNCHECKED
                 continue
