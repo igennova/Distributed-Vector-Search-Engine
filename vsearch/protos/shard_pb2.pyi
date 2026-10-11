@@ -27,14 +27,16 @@ class AddResponse(_message.Message):
     def __init__(self, size: _Optional[int] = ...) -> None: ...
 
 class SearchRequest(_message.Message):
-    __slots__ = ("query", "k", "with_payloads")
+    __slots__ = ("query", "k", "with_payloads", "filter")
     QUERY_FIELD_NUMBER: _ClassVar[int]
     K_FIELD_NUMBER: _ClassVar[int]
     WITH_PAYLOADS_FIELD_NUMBER: _ClassVar[int]
+    FILTER_FIELD_NUMBER: _ClassVar[int]
     query: _containers.RepeatedScalarFieldContainer[float]
     k: int
     with_payloads: bool
-    def __init__(self, query: _Optional[_Iterable[float]] = ..., k: _Optional[int] = ..., with_payloads: _Optional[bool] = ...) -> None: ...
+    filter: str
+    def __init__(self, query: _Optional[_Iterable[float]] = ..., k: _Optional[int] = ..., with_payloads: _Optional[bool] = ..., filter: _Optional[str] = ...) -> None: ...
 
 class Hit(_message.Message):
     __slots__ = ("global_id", "distance", "payload")

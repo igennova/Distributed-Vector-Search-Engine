@@ -35,6 +35,8 @@ message SearchRequest {
   repeated float query = 1;
   int32 k = 2;
   bool with_payloads = 3;      // also return each hit's payload
+  string filter = 4;           // only return vectors whose payload matches: JSON text of
+                               // {field: [accepted values]}, every field must match ("" = all)
 }
 
 message Hit {

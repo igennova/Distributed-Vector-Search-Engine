@@ -13,6 +13,7 @@ import grpc
 import numpy as np
 
 from .cluster import Shard
+from .filtering import decode_filter
 from .protos import shard_pb2, shard_pb2_grpc
 from .storage import DurableShard, OutOfOrderWrite
 
@@ -51,12 +52,16 @@ class ShardServicer(shard_pb2_grpc.ShardServiceServicer):
 
     def Search(self, request, context):
         query = np.asarray(request.query, dtype=np.float32)
+        try:
+            where = decode_filter(request.filter)
+        except ValueError as err:                 # includes text that is not JSON
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"bad filter: {err}")
         with self.lock:
             if request.with_payloads:
-                hits = self.shard.search_with_payloads(query, request.k)
+                hits = self.shard.search_with_payloads(query, request.k, where)
             else:
                 hits = [(dist, global_id, "") for dist, global_id in
-                        self.shard.search(query, request.k)]
+                        self.shard.search(query, request.k, where)]
         return shard_pb2.SearchResponse(
             hits=[shard_pb2.Hit(global_id=global_id, distance=dist, payload=payload)
                   for dist, global_id, payload in hits])

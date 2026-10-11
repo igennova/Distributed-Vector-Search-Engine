@@ -317,11 +317,11 @@ class DurableShard:
         self.snapshot_seq = self.last_seq
         self.vectors_since_snapshot = 0
 
-    def search(self, query, k):
-        return self.shard.search(query, k)
+    def search(self, query, k, where=None):
+        return self.shard.search(query, k, where)
 
-    def search_with_payloads(self, query, k):
-        return self.shard.search_with_payloads(query, k)
+    def search_with_payloads(self, query, k, where=None):
+        return self.shard.search_with_payloads(query, k, where)
 
     @property
     def next_global_id(self):

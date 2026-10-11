@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1avsearch/protos/shard.proto\x12\x07vsearch\"\\\n\nAddRequest\x12\x12\n\nglobal_ids\x18\x01 \x03(\x03\x12\x0b\n\x03\x64im\x18\x02 \x01(\x05\x12\x0e\n\x06values\x18\x03 \x03(\x02\x12\x0b\n\x03seq\x18\x04 \x01(\x04\x12\x10\n\x08payloads\x18\x05 \x03(\t\"\x1b\n\x0b\x41\x64\x64Response\x12\x0c\n\x04size\x18\x01 \x01(\x03\"@\n\rSearchRequest\x12\r\n\x05query\x18\x01 \x03(\x02\x12\t\n\x01k\x18\x02 \x01(\x05\x12\x15\n\rwith_payloads\x18\x03 \x01(\x08\";\n\x03Hit\x12\x11\n\tglobal_id\x18\x01 \x01(\x03\x12\x10\n\x08\x64istance\x18\x02 \x01(\x02\x12\x0f\n\x07payload\x18\x03 \x01(\t\",\n\x0eSearchResponse\x12\x1a\n\x04hits\x18\x01 \x03(\x0b\x32\x0c.vsearch.Hit\"\x0f\n\rStatusRequest\"o\n\x0eStatusResponse\x12\x0c\n\x04size\x18\x01 \x01(\x03\x12\x0f\n\x07\x64urable\x18\x02 \x01(\x08\x12\x10\n\x08last_seq\x18\x03 \x01(\x04\x12\x14\n\x0csnapshot_seq\x18\x04 \x01(\x04\x12\x16\n\x0enext_global_id\x18\x05 \x01(\x03\"$\n\x0f\x46\x65tchLogRequest\x12\x11\n\tafter_seq\x18\x01 \x01(\x04\"[\n\tLogRecord\x12\x0b\n\x03seq\x18\x01 \x01(\x04\x12\x12\n\nglobal_ids\x18\x02 \x03(\x03\x12\x0b\n\x03\x64im\x18\x03 \x01(\x05\x12\x0e\n\x06values\x18\x04 \x03(\x02\x12\x10\n\x08payloads\x18\x05 \x03(\t\"\x16\n\x14\x46\x65tchSnapshotRequest\"/\n\rSnapshotChunk\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\x10\n\x08last_seq\x18\x02 \x01(\x04\"\x1f\n\x0fSyncFromRequest\x12\x0c\n\x04peer\x18\x01 \x01(\t\"M\n\x10SyncFromResponse\x12\x0e\n\x06method\x18\x01 \x01(\t\x12\x17\n\x0frecords_applied\x18\x02 \x01(\x03\x12\x10\n\x08last_seq\x18\x03 \x01(\x04\x32\xfd\x02\n\x0cShardService\x12\x30\n\x03\x41\x64\x64\x12\x13.vsearch.AddRequest\x1a\x14.vsearch.AddResponse\x12\x39\n\x06Search\x12\x16.vsearch.SearchRequest\x1a\x17.vsearch.SearchResponse\x12\x39\n\x06Status\x12\x16.vsearch.StatusRequest\x1a\x17.vsearch.StatusResponse\x12:\n\x08\x46\x65tchLog\x12\x18.vsearch.FetchLogRequest\x1a\x12.vsearch.LogRecord0\x01\x12H\n\rFetchSnapshot\x12\x1d.vsearch.FetchSnapshotRequest\x1a\x16.vsearch.SnapshotChunk0\x01\x12?\n\x08SyncFrom\x12\x18.vsearch.SyncFromRequest\x1a\x19.vsearch.SyncFromResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1avsearch/protos/shard.proto\x12\x07vsearch\"\\\n\nAddRequest\x12\x12\n\nglobal_ids\x18\x01 \x03(\x03\x12\x0b\n\x03\x64im\x18\x02 \x01(\x05\x12\x0e\n\x06values\x18\x03 \x03(\x02\x12\x0b\n\x03seq\x18\x04 \x01(\x04\x12\x10\n\x08payloads\x18\x05 \x03(\t\"\x1b\n\x0b\x41\x64\x64Response\x12\x0c\n\x04size\x18\x01 \x01(\x03\"P\n\rSearchRequest\x12\r\n\x05query\x18\x01 \x03(\x02\x12\t\n\x01k\x18\x02 \x01(\x05\x12\x15\n\rwith_payloads\x18\x03 \x01(\x08\x12\x0e\n\x06\x66ilter\x18\x04 \x01(\t\";\n\x03Hit\x12\x11\n\tglobal_id\x18\x01 \x01(\x03\x12\x10\n\x08\x64istance\x18\x02 \x01(\x02\x12\x0f\n\x07payload\x18\x03 \x01(\t\",\n\x0eSearchResponse\x12\x1a\n\x04hits\x18\x01 \x03(\x0b\x32\x0c.vsearch.Hit\"\x0f\n\rStatusRequest\"o\n\x0eStatusResponse\x12\x0c\n\x04size\x18\x01 \x01(\x03\x12\x0f\n\x07\x64urable\x18\x02 \x01(\x08\x12\x10\n\x08last_seq\x18\x03 \x01(\x04\x12\x14\n\x0csnapshot_seq\x18\x04 \x01(\x04\x12\x16\n\x0enext_global_id\x18\x05 \x01(\x03\"$\n\x0f\x46\x65tchLogRequest\x12\x11\n\tafter_seq\x18\x01 \x01(\x04\"[\n\tLogRecord\x12\x0b\n\x03seq\x18\x01 \x01(\x04\x12\x12\n\nglobal_ids\x18\x02 \x03(\x03\x12\x0b\n\x03\x64im\x18\x03 \x01(\x05\x12\x0e\n\x06values\x18\x04 \x03(\x02\x12\x10\n\x08payloads\x18\x05 \x03(\t\"\x16\n\x14\x46\x65tchSnapshotRequest\"/\n\rSnapshotChunk\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\x10\n\x08last_seq\x18\x02 \x01(\x04\"\x1f\n\x0fSyncFromRequest\x12\x0c\n\x04peer\x18\x01 \x01(\t\"M\n\x10SyncFromResponse\x12\x0e\n\x06method\x18\x01 \x01(\t\x12\x17\n\x0frecords_applied\x18\x02 \x01(\x03\x12\x10\n\x08last_seq\x18\x03 \x01(\x04\x32\xfd\x02\n\x0cShardService\x12\x30\n\x03\x41\x64\x64\x12\x13.vsearch.AddRequest\x1a\x14.vsearch.AddResponse\x12\x39\n\x06Search\x12\x16.vsearch.SearchRequest\x1a\x17.vsearch.SearchResponse\x12\x39\n\x06Status\x12\x16.vsearch.StatusRequest\x1a\x17.vsearch.StatusResponse\x12:\n\x08\x46\x65tchLog\x12\x18.vsearch.FetchLogRequest\x1a\x12.vsearch.LogRecord0\x01\x12H\n\rFetchSnapshot\x12\x1d.vsearch.FetchSnapshotRequest\x1a\x16.vsearch.SnapshotChunk0\x01\x12?\n\x08SyncFrom\x12\x18.vsearch.SyncFromRequest\x1a\x19.vsearch.SyncFromResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -36,27 +36,27 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_ADDRESPONSE']._serialized_start=133
   _globals['_ADDRESPONSE']._serialized_end=160
   _globals['_SEARCHREQUEST']._serialized_start=162
-  _globals['_SEARCHREQUEST']._serialized_end=226
-  _globals['_HIT']._serialized_start=228
-  _globals['_HIT']._serialized_end=287
-  _globals['_SEARCHRESPONSE']._serialized_start=289
-  _globals['_SEARCHRESPONSE']._serialized_end=333
-  _globals['_STATUSREQUEST']._serialized_start=335
-  _globals['_STATUSREQUEST']._serialized_end=350
-  _globals['_STATUSRESPONSE']._serialized_start=352
-  _globals['_STATUSRESPONSE']._serialized_end=463
-  _globals['_FETCHLOGREQUEST']._serialized_start=465
-  _globals['_FETCHLOGREQUEST']._serialized_end=501
-  _globals['_LOGRECORD']._serialized_start=503
-  _globals['_LOGRECORD']._serialized_end=594
-  _globals['_FETCHSNAPSHOTREQUEST']._serialized_start=596
-  _globals['_FETCHSNAPSHOTREQUEST']._serialized_end=618
-  _globals['_SNAPSHOTCHUNK']._serialized_start=620
-  _globals['_SNAPSHOTCHUNK']._serialized_end=667
-  _globals['_SYNCFROMREQUEST']._serialized_start=669
-  _globals['_SYNCFROMREQUEST']._serialized_end=700
-  _globals['_SYNCFROMRESPONSE']._serialized_start=702
-  _globals['_SYNCFROMRESPONSE']._serialized_end=779
-  _globals['_SHARDSERVICE']._serialized_start=782
-  _globals['_SHARDSERVICE']._serialized_end=1163
+  _globals['_SEARCHREQUEST']._serialized_end=242
+  _globals['_HIT']._serialized_start=244
+  _globals['_HIT']._serialized_end=303
+  _globals['_SEARCHRESPONSE']._serialized_start=305
+  _globals['_SEARCHRESPONSE']._serialized_end=349
+  _globals['_STATUSREQUEST']._serialized_start=351
+  _globals['_STATUSREQUEST']._serialized_end=366
+  _globals['_STATUSRESPONSE']._serialized_start=368
+  _globals['_STATUSRESPONSE']._serialized_end=479
+  _globals['_FETCHLOGREQUEST']._serialized_start=481
+  _globals['_FETCHLOGREQUEST']._serialized_end=517
+  _globals['_LOGRECORD']._serialized_start=519
+  _globals['_LOGRECORD']._serialized_end=610
+  _globals['_FETCHSNAPSHOTREQUEST']._serialized_start=612
+  _globals['_FETCHSNAPSHOTREQUEST']._serialized_end=634
+  _globals['_SNAPSHOTCHUNK']._serialized_start=636
+  _globals['_SNAPSHOTCHUNK']._serialized_end=683
+  _globals['_SYNCFROMREQUEST']._serialized_start=685
+  _globals['_SYNCFROMREQUEST']._serialized_end=716
+  _globals['_SYNCFROMRESPONSE']._serialized_start=718
+  _globals['_SYNCFROMRESPONSE']._serialized_end=795
+  _globals['_SHARDSERVICE']._serialized_start=798
+  _globals['_SHARDSERVICE']._serialized_end=1179
 # @@protoc_insertion_point(module_scope)

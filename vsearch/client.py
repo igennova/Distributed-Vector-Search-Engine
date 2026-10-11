@@ -19,8 +19,9 @@ from typing import NamedTuple
 import grpc
 import numpy as np
 
-from .cluster import (Hit, decode_payload, encode_payloads, merge_top_k_scored,
-                      route_round_robin)
+from .cluster import (Hit, decode_payload, encode_payloads, merge_top_k_scored, plan_query,
+                      route_round_robin, route_to_shard, shard_for_namespace, tag_namespace)
+from .filtering import encode_filter
 from .protos import shard_pb2, shard_pb2_grpc
 
 # gRPC rejects messages over 4 MB by default; keep each Add request well under that.
@@ -87,19 +88,24 @@ class GrpcCoordinator:
         self._next_replica = [0] * len(self.replicas) # round-robin position per shard
         self._last_seqs = [None] * len(self.replicas) # per shard: last write all replicas agree on
 
-    def add(self, vectors, payloads=None):
-        """Index vectors, optionally each with a payload (a JSON-serializable dict, or None)."""
+    def add(self, vectors, payloads=None, namespace=None):
+        """Index vectors, optionally each with a payload (a JSON-serializable dict, or None).
+        With a namespace, all of them go to that namespace's shard."""
         vectors = np.asarray(vectors, dtype=np.float32)
         if len(vectors) == 0:
             return self
-        encoded = encode_payloads(payloads, len(vectors))
+        encoded = encode_payloads(tag_namespace(payloads, len(vectors), namespace), len(vectors))
         self._check_shards()
         dim = vectors.shape[1]
         # Payloads share the request with their vectors, so leave room for the largest one.
         largest_payload = max(len(text.encode("utf-8")) for text in encoded)
         per_request = max(1, MAX_ADD_BYTES // (dim * vectors.itemsize + largest_payload))
-        batches = route_round_robin(vectors, len(self.replicas), start_id=self.size,
-                                    payloads=encoded)
+        if namespace is None:
+            batches = route_round_robin(vectors, len(self.replicas), start_id=self.size,
+                                        payloads=encoded)
+        else:
+            batches = route_to_shard(vectors, len(self.replicas), self.shard_for(namespace),
+                                     start_id=self.size, payloads=encoded)
         self.size += len(vectors)
 
         # Write-all: every chunk goes to every replica of its shard, so the copies stay
@@ -198,45 +204,53 @@ class GrpcCoordinator:
         self._last_seqs = [None] * len(self.replicas)   # re-check before the next write
         return synced
 
-    def search(self, query, k=10):
-        """Global top-k ids. Raises ShardUnavailableError if any shard has no live replica."""
-        return [global_id for _, global_id in self.search_scored(query, k)]
+    def shard_for(self, namespace):
+        """The shard that holds a namespace."""
+        return shard_for_namespace(namespace, len(self.replicas))
 
-    def search_scored(self, query, k=10):
+    def search(self, query, k=10, where=None, namespace=None):
+        """Global top-k ids. Raises ShardUnavailableError if a shard it needs has no live
+        replica. `where` keeps only vectors whose payload matches (see filtering.py);
+        `namespace` searches inside that namespace only, on the one shard that holds it."""
+        return [global_id for _, global_id in self.search_scored(query, k, where, namespace)]
+
+    def search_scored(self, query, k=10, where=None, namespace=None):
         """Like search, but returns (distance, global_id) pairs, closest first."""
-        scored, missing = self._scatter_gather(query, k)
+        scored, missing = self._scatter_gather(query, k, False, where, namespace)
         if missing:
             raise ShardUnavailableError(missing)
         return scored
 
-    def search_hits(self, query, k=10):
+    def search_hits(self, query, k=10, where=None, namespace=None):
         """The k nearest vectors as Hit(id, distance, payload), closest first."""
-        scored, missing = self._scatter_gather(query, k, with_payloads=True)
+        scored, missing = self._scatter_gather(query, k, True, where, namespace)
         if missing:
             raise ShardUnavailableError(missing)
         return [Hit(global_id, dist, decode_payload(text)) for dist, global_id, text in scored]
 
-    def search_partial(self, query, k=10):
+    def search_partial(self, query, k=10, where=None, namespace=None):
         """Like search, but skips shards whose replicas are all down instead of failing.
 
         Returns (ids, missing_shards). A non-empty missing_shards means the results come
         from the remaining shards only and may lack some true nearest neighbors.
         """
-        scored, missing = self._scatter_gather(query, k)
+        scored, missing = self._scatter_gather(query, k, False, where, namespace)
         return [global_id for _, global_id in scored], missing
 
-    def _scatter_gather(self, query, k, with_payloads=False):
-        """Ask one replica of every shard, failing over as needed. Returns (scored, missing_shards)."""
+    def _scatter_gather(self, query, k, with_payloads=False, where=None, namespace=None):
+        """Ask one replica of every shard that can hold a match, failing over as needed.
+        Returns (scored, missing_shards)."""
+        where, targets = plan_query(where, namespace, len(self.replicas))
         request = shard_pb2.SearchRequest(query=np.asarray(query, dtype=np.float32).tolist(), k=k,
-                                          with_payloads=with_payloads)
+                                          with_payloads=with_payloads, filter=encode_filter(where))
         now = time.monotonic()
-        orders = [self._replica_order(shard, now) for shard in range(len(self.replicas))]
-        tried = [0] * len(self.replicas)
+        orders = {shard: self._replica_order(shard, now) for shard in targets}
+        tried = dict.fromkeys(targets, 0)
 
         # One request per shard, all sent before waiting on any (parallel fan-out). Shards
         # whose replica fails are retried together on their next replica, still in parallel.
         pending = {shard: order[0].stub.Search.future(request, timeout=self.timeout)
-                   for shard, order in enumerate(orders)}
+                   for shard, order in orders.items()}
         per_shard, missing = [], []
         while pending:
             retries = {}
