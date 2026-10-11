@@ -101,6 +101,27 @@ is downloaded once (about 67 MB) to `~/.cache/vsearch/models`. Without fastembed
 Ingesting the same files again adds nothing: each file's content hash is recorded, and unchanged
 files are skipped.
 
+A search can be limited to passages whose fields match, and documents can be kept apart in
+namespaces (one per user or project). A namespace is stored on a single shard, so a search
+inside it asks that shard only (shown here on a cluster started with `--shards 4`):
+
+```console
+$ vsearch --home data/docs search "how are replicas repaired" --where source=DECISIONS.md
+passages closest to 'how are replicas repaired':
+  1. 0.747  DECISIONS.md > Replica resync
+     - `repair()` finds the replica with the highest seq for each shard and tells each replica that
+     is behind to `SyncFrom` it. ...
+(embed 382.8 ms, search 5.6 ms across 4 shards)
+$ vsearch --home data/docs ingest DECISIONS.md --namespace alice
+ingested 47 passages into namespace 'alice' (shard 3 of 4) in 1.8s
+$ vsearch --home data/docs search "why is exact search sometimes faster than the graph" --namespace alice
+passages closest to 'why is exact search sometimes faster than the graph':
+  1. 0.799  DECISIONS.md > Metadata filtering
+     - Surprise in the numbers: exact search wins far more often than expected, for any filter under
+     about a third of a 100k shard. ...
+(embed 386.6 ms, search 3.6 ms on shard 3 of 4)
+```
+
 ## Project layout
 
 ```
@@ -112,6 +133,7 @@ vsearch/            the engine
   server.py           one shard served over gRPC, plus replica catch-up
   storage.py          snapshots + write-ahead log, so a shard survives restarts
   client.py           gRPC coordinator (replication, failover, repair) + local cluster launcher
+  filtering.py        filters and the per-shard payload index that answers them
   chunking.py         split a document into passages along headings and sentences
   embedding.py        text -> vector: a local embedding model, or word hashing
   ingest.py           files -> passages -> vectors with payloads
@@ -166,6 +188,18 @@ with GrpcCoordinator([f"127.0.0.1:{port}" for port in range(50051, 50055)]) as c
 Servers listen on `127.0.0.1` by default. The service has no authentication, so only pass
 `--host 0.0.0.0` on a trusted network.
 
+For replicas, start more than one server per shard with that shard's seed (for example a second
+set on ports 50061–50064 with `--seed 0` to `--seed 3`) and pass one list of addresses per shard.
+Writes go to every copy, and a search keeps working if a copy dies:
+
+```python
+shards = [[f"127.0.0.1:{50051 + i}", f"127.0.0.1:{50061 + i}"] for i in range(4)]
+with GrpcCoordinator(shards) as coord:
+    coord.add(vectors)
+    ids = coord.search(queries[0])                   # raises ShardUnavailableError if a shard has no live copy
+    ids, missing = coord.search_partial(queries[0])  # or: results from the live shards + the missing ones
+```
+
 By default a shard lives in memory only, so a restarted server starts empty. Give each server
 its own `--data-dir` and it keeps a snapshot plus a write-ahead log there, and recovers both
 on startup:
@@ -201,17 +235,32 @@ for hit in coord.search_hits(query, k=5):
     print(hit.id, hit.distance, hit.payload)
 ```
 
-For replicas, start more than one server per shard with that shard's seed (for example a second
-set on ports 50061–50064 with `--seed 0` to `--seed 3`) and pass one list of addresses per shard.
-Writes go to every copy, and a search keeps working if a copy dies:
+### Filters and namespaces
+
+A search can be restricted to the vectors whose payload matches a filter. Every field has to
+match; a list accepts any of its values:
 
 ```python
-shards = [[f"127.0.0.1:{50051 + i}", f"127.0.0.1:{50061 + i}"] for i in range(4)]
-with GrpcCoordinator(shards) as coord:
-    coord.add(vectors)
-    ids = coord.search(queries[0])                   # raises ShardUnavailableError if a shard has no live copy
-    ids, missing = coord.search_partial(queries[0])  # or: results from the live shards + the missing ones
+coord.search_hits(query, k=5, where={"source": "DECISIONS.md"})
+coord.search_hits(query, k=5, where={"lang": ["en", "de"], "year": 2024})
 ```
+
+Each shard answers a filtered search in whichever of two ways is cheaper: if few vectors
+match, it compares the query with every one of them (exact); if many match, it walks the HNSW
+graph and keeps only matching nodes. Filtering the unfiltered top-k afterwards is not used: it
+returns fewer than k results, or none.
+
+A namespace is a separate set of vectors inside the same cluster, for one user, project, or
+agent:
+
+```python
+coord.add(vectors, payloads, namespace="alice")
+coord.search_hits(query, k=5, namespace="alice")     # only alice's vectors, from one shard
+```
+
+All of a namespace's vectors go to the one shard its name hashes to, so searching it costs one
+request instead of one per shard, and it keeps working when other shards are down. A search
+without a namespace still covers every shard.
 
 ## Benchmarks
 
@@ -398,6 +447,52 @@ here), so at this size it still wins even for a 50-vector gap. The balance shift
 grow: a snapshot of a large shard is gigabytes to send, while a small gap stays cheap from the
 log. Run it with `python -m benchmarks.bench_resync`.
 
+### Filtered search and namespaces
+
+Filtered search on GloVe (`ef_search=100`), each vector given a random group and the filter
+selecting one share of the data. Recall is against the exact filtered answer. "Filter after"
+searches the unfiltered top 10 and drops what does not match.
+
+100,000 vectors:
+
+| Matching | Filter after: recall (results) | Graph: recall | Graph | Exact | Engine picks |
+|----------|--------------------------------|---------------|-------|-------|--------------|
+| 50%  | 0.470 (4.8 of 10) | 0.906 | 1.15 ms  | 1.27 ms | graph |
+| 20%  | 0.214 (2.2)       | 0.970 | 2.40 ms  | 0.53 ms | exact |
+| 10%  | 0.109 (1.1)       | 0.983 | 4.61 ms  | 0.27 ms | exact |
+| 1%   | 0.013 (0.1)       | 0.998 | 35.4 ms  | 0.03 ms | exact |
+| 0.1% | 0.002 (0.0)       | 1.000 | 143 ms   | 0.01 ms | exact |
+
+399,000 vectors:
+
+| Matching | Graph: recall | Graph | Exact | Engine picks |
+|----------|---------------|-------|-------|--------------|
+| 50%  | 0.941 | 1.18 ms | 5.11 ms | graph |
+| 20%  | 0.970 | 2.72 ms | 5.09 ms | graph |
+| 10%  | 0.976 | 4.93 ms | 2.53 ms | exact |
+| 1%   | 0.996 | 43.7 ms | 0.11 ms | exact |
+| 0.1% | 1.000 | 311 ms  | 0.02 ms | exact |
+
+- Filtering after the search returns about `10 x share` results: useless for selective filters.
+- The graph walk slows down as the filter gets more selective (it has to pass about
+  `ef / share` nodes), at the same rate whatever the size of the index. Exact search over the
+  matching vectors does the opposite: it gets faster.
+- So each shard estimates both costs and picks one. The crossover moves with size: about a
+  third of the vectors at 100k, a sixth at 400k.
+
+Namespaces (100,000 vectors owned by 200 tenants, 4 shard servers over gRPC, 400 searches each
+inside one tenant). "Spread" stores tenants round-robin with a `tenant` payload field and
+filters on it; "namespace" stores each tenant on the shard its name hashes to:
+
+| Layout | Shards asked | Recall@10 | p50 | p99 | Tenants still searchable with 1 shard down |
+|--------|--------------|-----------|-----|-----|---------------------------------------------|
+| Spread    | 4 | 1.000 | 0.44 ms | 0.57 ms | 0%  |
+| Namespace | 1 | 1.000 | 0.25 ms | 0.35 ms | 76% |
+
+One request instead of four makes a tenant's search about 1.8x faster here, and a dead shard
+takes down only the tenants stored on it. The shards stayed balanced (24,500 to 25,500 vectors
+each) because the tenants are the same size; one very large tenant would make its shard large.
+
 ## Roadmap
 
 - [x] Exact brute-force cosine baseline + benchmark harness
@@ -412,7 +507,7 @@ log. Run it with `python -m benchmarks.bench_resync`.
 - [x] Command-line interface (`vsearch`)
 - [x] Payloads: data stored with each vector and returned with search results
 - [x] Text ingestion: chunk documents, embed them locally, search by question
-- [ ] Metadata filtering and namespaces
+- [x] Metadata filtering, and namespaces that each live on one shard
 - [ ] MCP server, agent memory, and a self-healing operations agent
 - [ ] Evaluations for retrieval and agent behavior
 - [ ] Docker / Kubernetes deployment

@@ -404,3 +404,79 @@
   replaced. A crash in the middle of a file can leave some of its passages stored without the
   file being recorded, and a re-run would add them again; fixing both needs deletes or
   idempotent writes. Only Markdown and plain text are read (no PDF or HTML).
+
+## Metadata filtering
+- A filter restricts a search to vectors whose payload matches: every listed field must match
+  (AND), and a list of values matches any of them (OR). Equality only: no ranges, negation,
+  or nested fields yet.
+- Filtering the unfiltered top-k afterwards is the obvious way and the wrong one: with a filter
+  matching 10% of the data it returned 1.1 results out of 10, and the right ones only by
+  accident (recall 0.109). The filter has to be part of the search.
+- Two ways that work, with opposite costs. Exact: compare the query with every matching
+  vector; time grows with the number of matches. Graph: walk the HNSW graph, keep only matching
+  nodes as results; it must pass about `ef / share` nodes to collect `ef` matches, so it gets
+  slower as the filter gets more selective (1.2 ms at 50%, 35 ms at 1%, 143 ms at 0.1% on 100k
+  vectors) and measured the same at 400k as at 100k for a given share.
+- The graph walk still travels through nodes that do not match. They are the roads to the ones
+  that do; skipping them would cut the graph into islands. It also keeps going until it holds
+  `ef` matches. The first test of that passed with the unfiltered stopping rule left in (the
+  allowed nodes were all far from the query, which hid it) and was rewritten.
+- Each shard picks per query: exact while `matches^2 <= EXACT_ADVANTAGE * ef * size`, which is
+  where the two cost estimates cross. The constant is 100; any value from 40 to 158 picks the
+  faster way at every point measured on 100k and 400k vectors. Near the crossover the two are
+  close, so a wrong pick there is cheap. Measured at 100 dimensions with `ef=100` on one
+  machine; the dependence on `ef` is assumed, not measured.
+- Surprise in the numbers: exact search wins far more often than expected, for any filter
+  under about a third of a 100k shard. A matrix product over 20,000 gathered rows takes
+  0.5 ms. This is the same lesson as the 10k benchmark, where numpy exact search beat HNSW.
+- Exact search per vector got more expensive on the larger index in the middle of the range
+  (40k to 80k scattered rows out of 399k took 2.5 to 5 ms, about 2.5x the per-vector cost at
+  100k), most likely because gathering scattered rows from a 160 MB matrix misses the cache.
+  Not investigated further; it is why the constant was set from both sizes.
+- The benchmark's groups are random, so matching vectors are spread evenly through the graph.
+  A real filter often correlates with the vectors (one source is one topic), which this does
+  not measure.
+- To know what matches without reading every payload, a shard keeps a payload index: (field,
+  value) to the ids that have it. Only top-level strings (up to 128 characters), integers,
+  booleans, and lists of those are indexed; a filter on anything else is refused with an
+  error instead of quietly matching nothing. The value's type is part of the key, because in
+  Python `True == 1`.
+- The index is not stored and not maintained on write. It is built on the first filtered
+  search and extended on later ones (0.17 s for 100,000 passage payloads; a lookup takes
+  0.02 to 0.12 ms). So snapshots, the log, and resync did not change, and a shard that is never
+  filtered never parses its payloads. The cost: the first filtered search after a restart
+  pays for the build while holding the shard's lock.
+- The filter travels as JSON text in `SearchRequest.filter`, like payloads. The coordinator
+  validates it before sending anything, and the server validates it again and answers
+  INVALID_ARGUMENT.
+
+## Namespaces
+- A namespace is a named, separate set of vectors in the same cluster: one per user, project,
+  or agent. The idea comes from how Discord stores messages for search: keep everything that
+  is searched together on one shard, so the search does not fan out.
+- All vectors of a namespace go to shard `crc32(name) % shards`, and each records its
+  namespace in a reserved payload field. A search inside a namespace asks that one shard, with
+  the namespace added to the filter, because a shard holds many namespaces in one graph.
+- Measured against spreading tenants over all shards and filtering: 1 request instead of 4,
+  p50 0.25 ms instead of 0.44 ms, and with one shard down 76% of tenants could still search
+  instead of none. Recall was 1.000 both ways, since a small tenant is searched exactly.
+- crc32 and not `hash()`, for the same reason as in the hashing embedder: the mapping has to
+  be the same in every process. A test pins three names to their shards.
+- Vectors without a namespace still go round-robin, and a search without one still covers
+  every shard, including namespaced vectors.
+- Costs and limits. A very large namespace makes its shard large; Discord gives such guilds a
+  dedicated index with several shards, and nothing like that exists here. Changing the number
+  of shards would map names to different shards, with no way to move the data (consistent
+  hashing plus rebalancing is the usual answer). Loading one tenant at a time builds on one
+  shard at a time: 52 s against 14 s for the same 100,000 vectors spread round-robin. And a
+  namespace separates data, it does not protect it: there is no authentication, and a search
+  without a namespace sees everything.
+- Found while building this: every new coordinator numbered its vectors from 0, so a second
+  `vsearch ingest` reused the ids of the first. A coordinator now asks the shards for the
+  largest id in use before its first write. The largest id rather than a count, because after
+  a write that reached only some shards a count would hand out ids already taken.
+- Each check was verified by removing it in a copy of the code and confirming a test fails:
+  keeping only allowed nodes, the stopping rule, the type in the index key, bringing the index
+  up to date, sending the filter over gRPC, rejecting a bad filter, adding the namespace to
+  the filter, asking one shard, routing writes, the reserved field, crc32, and the id
+  continuation.
