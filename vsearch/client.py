@@ -147,6 +147,11 @@ class GrpcCoordinator:
                     self._last_seqs[shard] += 1
         return self
 
+    def refresh(self):
+        """Forget what is known about the shards' write positions, so the next write asks
+        them again. For a long-lived coordinator, when another one may have written since."""
+        self._last_seqs = [None] * len(self.replicas)
+
     def _check_shards(self):
         """Ask the shards where they are before writing to them.
 

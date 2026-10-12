@@ -9,6 +9,7 @@ Command-line interface for running and querying a local cluster.
     vsearch search "..." --where source=README.md   only passages whose fields match
     vsearch ingest notes/ --namespace alice       keep one user's documents apart, on one shard
     vsearch search "..." --namespace alice        search only that user's documents
+    vsearch mcp                                   serve search/ingest/status to an MCP client
     vsearch status                                state, size, and write position of every server
     vsearch cluster kill 0 1                      crash shard 0's replica 1
     vsearch cluster restart 0 1                   start it again (it recovers from disk)
@@ -36,6 +37,7 @@ from .client import (REPO_ROOT, ReplicasOutOfSyncError, ShardUnavailableError, f
 from .dataset import load_glove
 from .documents import DEFAULT_EMBEDDER, describe, find_passages, ingest_files
 from .embedding import EMBEDDERS, EmbedderUnavailable
+from .mcp_server import build_server
 from .state import (UserError, address, connect, read_state, server_status, servers, writable,
                     write_state)
 
@@ -306,6 +308,12 @@ def search(args):
     return 0
 
 
+def mcp(args):
+    read_state(args.home)                      # fail now, not on the first tool call
+    build_server(args.home, read_only=args.read_only, embedder=args.embedder).serve()
+    return 0
+
+
 def repair(args):
     state = read_state(args.home)
     with connect(state) as coordinator:
@@ -388,6 +396,15 @@ def build_parser():
                           help="only passages whose field has this value, e.g. "
                                "source=README.md; repeat a field to accept several values")
     searcher.set_defaults(run=search)
+
+    server = commands.add_parser(
+        "mcp", help="serve this cluster to an MCP client over stdin/stdout")
+    server.add_argument("--read-only", action="store_true",
+                        help="offer search and status only, not ingest")
+    server.add_argument("--embedder", choices=sorted(EMBEDDERS),
+                        help=f"embedder for a collection created through the ingest tool "
+                             f"(default: {DEFAULT_EMBEDDER})")
+    server.set_defaults(run=mcp)
     return parser
 
 
