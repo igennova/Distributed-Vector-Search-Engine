@@ -480,3 +480,55 @@
   up to date, sending the filter over gRPC, rejecting a bad filter, adding the namespace to
   the filter, asking one shard, routing writes, the reserved field, crc32, and the id
   continuation.
+
+## MCP server
+- Until now only a person at a terminal could use the engine. The Model Context Protocol is
+  the standard way for an AI application to call tools another program offers, so `vsearch mcp`
+  makes the engine usable by any client that speaks it, with no code specific to one client.
+- The protocol layer is written here (`mcp.py`, about 190 lines) instead of using the official
+  SDK. What a tools-only server needs is small: JSON-RPC 2.0 over stdin and stdout, one message
+  per line, and four methods (`initialize`, `ping`, `tools/list`, `tools/call`). Writing it
+  keeps the project free of another dependency and lets CI test the whole session. The cost:
+  only the stdio transport, no resources or prompts, a hand-written check of tool arguments
+  that covers part of JSON Schema, and new protocol revisions have to be followed by hand.
+- Version negotiation: the server answers with the client's protocol revision if it speaks it
+  (2024-11-05, 2025-03-26, 2025-06-18), otherwise with its newest, and the client decides.
+- Two kinds of failure are kept apart, as the protocol asks. A tool that ran and failed
+  returns a normal result with `isError`, written for the model: what went wrong and what to
+  do instead ("Nothing is indexed yet. Add documents with the ingest tool first."). A request
+  the server cannot serve (unknown method, unknown tool) is a JSON-RPC error for the client
+  program. Bad arguments are the first kind, so a model that sends `k: 100` reads "must be at
+  most 20" and can correct itself. A bug inside a tool is caught and reported the same way
+  instead of ending the session.
+- stdout is the protocol channel, so one stray `print` from any library would corrupt the
+  stream. While serving, everything written to `sys.stdout` is redirected to stderr; a test
+  has a tool print and checks the output stays clean.
+- Tools are few and their arguments flat: `search(question, k, namespace, source)` instead
+  of exposing the general filter. The description of each tool and argument is what the model
+  reads to decide when and how to call it, so they say when to use the tool, not how it works.
+  Results are whole passages with their file and section, so an answer can cite them; `k` is
+  capped at 20 to bound the size of a reply.
+- The server lives as long as the client's session, unlike the command line where every call
+  is a new process. The embedding model is loaded once: the first search of a session took
+  407 ms, later ones a median of 4.5 ms, against about 390 ms for every `vsearch search`. The
+  coordinator is kept too, so its memory of which replica failed last now carries over.
+- A long-lived coordinator met a new problem: the command line may write between two of its
+  writes, leaving its idea of the shards' write positions stale. It now re-reads them before
+  each ingest (`refresh()`); a test ingests through the server, then the command line, then
+  the server again. Two writers at the same moment are still not supported.
+- `ingest` reads any path the server process can read and adds it to the index, at the
+  request of the model. The client asks its user before running a tool, and `--read-only`
+  leaves the tool out entirely. There is no authentication; the server is meant to run
+  locally, started by the client.
+- Tool calls are handled one at a time. Ingesting a large folder blocks the session until it
+  finishes, with no progress reports and no cancellation.
+- To share the logic between the command line and the tools, the cluster-state helpers and
+  the document logic moved out of `cli.py` into `state.py` and `documents.py`.
+- Tested by a client written for the tests, which starts `vsearch mcp` as a separate process
+  and speaks the protocol over real pipes. Not yet tried with a third-party MCP client.
+- Each check was verified by removing it in a copy of the code and confirming a test fails:
+  the stdout redirection, not answering notifications, catching a crashing tool, tool errors
+  as results, checking arguments, booleans not passing as integers, version negotiation,
+  `--read-only`, the refresh before a write, and turning user errors into tool errors. The
+  last one survived at first, because the catch-all for crashing tools hid it behind a worse
+  message; the test now checks the wording.

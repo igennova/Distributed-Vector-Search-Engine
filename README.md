@@ -122,6 +122,49 @@ passages closest to 'why is exact search sometimes faster than the graph':
 (embed 386.6 ms, search 3.6 ms on shard 3 of 4)
 ```
 
+### Use it from an AI assistant (MCP)
+
+`vsearch mcp` serves the cluster over the [Model Context Protocol](https://modelcontextprotocol.io),
+so an assistant or coding agent that supports MCP can search the indexed documents by itself.
+It offers three tools:
+
+| Tool | What it does |
+|------|--------------|
+| `search` | The passages most relevant to a question, each with its file and section; optionally inside one namespace or one file |
+| `ingest` | Add files or directories to the index (left out with `--read-only`) |
+| `status` | Which servers are up, how many vectors each holds, and what is indexed |
+
+Start the cluster as above, then register the command in the client's MCP configuration. Most
+clients use this form; the paths must be absolute, because the client starts the command from
+its own working directory:
+
+```json
+{
+  "mcpServers": {
+    "vsearch": {
+      "command": "/path/to/vector-search-engine/.venv/bin/vsearch",
+      "args": ["--home", "/path/to/vector-search-engine/data/docs", "mcp"]
+    }
+  }
+}
+```
+
+The client and the server exchange JSON-RPC messages over stdin and stdout, one per line, so a
+session can be tried by hand:
+
+```console
+$ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"status","arguments":{}}}' \
+    | vsearch --home data/docs mcp
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "2 of 2 servers up
+(2 shards).\nIngested: 85 passages from 2 file(s), embedder: hash.\nFiles: DECISIONS.md,
+README.md\nshard 0: replica 0 up (43 vectors, seq 2)\nshard 1: replica 0 up (42 vectors, seq
+2)"}], "isError": false}}
+```
+
+(The reply is one line; it is wrapped here.) The server lives as long as the client's session,
+so the embedding model is loaded once: the first search of a session took 407 ms and later ones
+a median of 4.5 ms, where every `vsearch search` pays about 390 ms.
+
 ## Project layout
 
 ```
@@ -137,6 +180,10 @@ vsearch/            the engine
   chunking.py         split a document into passages along headings and sentences
   embedding.py        text -> vector: a local embedding model, or word hashing
   ingest.py           files -> passages -> vectors with payloads
+  state.py            a local cluster's recorded state (cluster.json) and server status
+  documents.py        a document collection on a cluster: ingest files, search passages
+  mcp.py              Model Context Protocol server over stdio (JSON-RPC), tool-agnostic
+  mcp_server.py       the engine's MCP tools: search, ingest, status
   cli.py              the `vsearch` command
   protos/shard.proto  the gRPC contract (Add, Search, Status, and the resync calls)
 scripts/            gen_protos.sh regenerates the gRPC code from the .proto
@@ -508,7 +555,8 @@ each) because the tenants are the same size; one very large tenant would make it
 - [x] Payloads: data stored with each vector and returned with search results
 - [x] Text ingestion: chunk documents, embed them locally, search by question
 - [x] Metadata filtering, and namespaces that each live on one shard
-- [ ] MCP server, agent memory, and a self-healing operations agent
+- [x] MCP server: search, ingest, and status as tools for an AI assistant
+- [ ] Agent memory, and a self-healing operations agent
 - [ ] Evaluations for retrieval and agent behavior
 - [ ] Docker / Kubernetes deployment
 
