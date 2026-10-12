@@ -31,57 +31,24 @@ from pathlib import Path
 
 import grpc
 
-from .client import (REPO_ROOT, GrpcCoordinator, ReplicasOutOfSyncError, ShardUnavailableError,
-                     free_ports, server_command, wait_until_ready)
-from .cluster import shard_for_namespace
+from .client import (REPO_ROOT, ReplicasOutOfSyncError, ShardUnavailableError, free_ports,
+                     server_command, wait_until_ready)
 from .dataset import load_glove
-from .embedding import EMBEDDERS, EmbedderUnavailable, get_embedder
-from .ingest import find_documents, fingerprint, ingest_passages, read_passages
-from .protos import shard_pb2, shard_pb2_grpc
+from .documents import DEFAULT_EMBEDDER, describe, find_passages, ingest_files
+from .embedding import EMBEDDERS, EmbedderUnavailable
+from .state import (UserError, address, connect, read_state, server_status, servers, writable,
+                    write_state)
 
 LOAD_BATCH = 10_000
-DEFAULT_EMBEDDER = "bge-small"
 SNIPPET_CHARS = 240
 _spawned = []     # keep handles to servers started by this process until it exits
-
-
-class CliError(Exception):
-    """Something to tell the user about, without a traceback."""
-
-
-# --- cluster state -------------------------------------------------------------------------
-
-def _read_state(home):
-    path = home / "cluster.json"
-    if not path.exists():
-        raise CliError(f"no cluster in {home}; start one with: vsearch cluster up")
-    return json.loads(path.read_text())
-
-
-def _write_state(home, state):
-    tmp = home / "cluster.json.tmp"
-    tmp.write_text(json.dumps(state, indent=2))
-    os.replace(tmp, home / "cluster.json")     # atomic: never leaves a half-written state file
-
-
-def _address(server):
-    return f"127.0.0.1:{server['port']}"
-
-
-def _servers(state):
-    return [(shard, replica, server) for shard, group in enumerate(state["servers"])
-            for replica, server in enumerate(group)]
 
 
 def _pick(state, shard, replica):
     try:
         return state["servers"][shard][replica]
     except IndexError:
-        raise CliError(f"there is no shard {shard} replica {replica} in this cluster") from None
-
-
-def _coordinator(state):
-    return GrpcCoordinator([[_address(server) for server in group] for group in state["servers"]])
+        raise UserError(f"there is no shard {shard} replica {replica} in this cluster") from None
 
 
 # --- server processes ----------------------------------------------------------------------
@@ -120,17 +87,17 @@ def _spawn(home, state, shard, replica):
     server["pid"] = process.pid
 
 
-def _wait_for(servers, home):
-    for shard, replica, server in servers:
+def _wait_for(targets, home):
+    for shard, replica, server in targets:
         try:
-            wait_until_ready(_address(server))
+            wait_until_ready(address(server))
         except grpc.FutureTimeoutError:
-            raise CliError(f"shard {shard} replica {replica} did not start; see "
+            raise UserError(f"shard {shard} replica {replica} did not start; see "
                            f"{home / 'logs' / f'shard-{shard}-replica-{replica}.log'}") from None
 
 
-def _stop(servers, sig):
-    running = [server for server in servers if _is_running(server)]
+def _stop(targets, sig):
+    running = [server for server in targets if _is_running(server)]
     for server in running:
         os.kill(server["pid"], sig)
     deadline = time.monotonic() + 10
@@ -144,9 +111,9 @@ def _stop(servers, sig):
 def cluster_up(args):
     home = args.home
     if (home / "cluster.json").exists():
-        state = _read_state(home)
-        if any(_is_running(server) for _, _, server in _servers(state)):
-            raise CliError("this cluster is already running; see: vsearch status")
+        state = read_state(home)
+        if any(_is_running(server) for _, _, server in servers(state)):
+            raise UserError("this cluster is already running; see: vsearch status")
         print(f"starting the existing cluster in {home} again (servers recover from disk)")
     else:
         home.mkdir(parents=True, exist_ok=True)
@@ -159,16 +126,16 @@ def cluster_up(args):
                         for _ in range(args.shards)],
             "dataset": None,
         }
-    for shard, replica, _ in _servers(state):
+    for shard, replica, _ in servers(state):
         _spawn(home, state, shard, replica)
-    _write_state(home, state)
-    _wait_for(_servers(state), home)
+    write_state(home, state)
+    _wait_for(servers(state), home)
     return status(args)
 
 
 def cluster_down(args):
-    state = _read_state(args.home)
-    stopped = _stop([server for _, _, server in _servers(state)], signal.SIGTERM)
+    state = read_state(args.home)
+    stopped = _stop([server for _, _, server in servers(state)], signal.SIGTERM)
     print(f"stopped {stopped} server(s)")
     if args.wipe:
         shutil.rmtree(args.home)
@@ -179,112 +146,88 @@ def cluster_down(args):
 
 
 def cluster_kill(args):
-    state = _read_state(args.home)
+    state = read_state(args.home)
     server = _pick(state, args.shard, args.replica)
     if not _stop([server], signal.SIGKILL):
-        raise CliError(f"shard {args.shard} replica {args.replica} is not running")
+        raise UserError(f"shard {args.shard} replica {args.replica} is not running")
     print(f"killed shard {args.shard} replica {args.replica} (SIGKILL, no clean shutdown)")
     return 0
 
 
 def cluster_restart(args):
-    state = _read_state(args.home)
+    state = read_state(args.home)
     server = _pick(state, args.shard, args.replica)
     if _is_running(server):
-        raise CliError(f"shard {args.shard} replica {args.replica} is already running")
+        raise UserError(f"shard {args.shard} replica {args.replica} is already running")
     _spawn(args.home, state, args.shard, args.replica)
-    _write_state(args.home, state)
+    write_state(args.home, state)
     _wait_for([(args.shard, args.replica, server)], args.home)
-    print(f"shard {args.shard} replica {args.replica} is back on {_address(server)}")
+    print(f"shard {args.shard} replica {args.replica} is back on {address(server)}")
     return 0
-
-
-def _server_status(server):
-    """A server's StatusResponse, or None if it does not answer."""
-    try:
-        with grpc.insecure_channel(_address(server)) as channel:
-            return shard_pb2_grpc.ShardServiceStub(channel).Status(shard_pb2.StatusRequest(),
-                                                                   timeout=1.0)
-    except grpc.RpcError:
-        return None
 
 
 def status(args):
-    state = _read_state(args.home)
+    state = read_state(args.home)
     print(f"{'shard':>5} {'replica':>7}  {'address':<17}{'state':<6}{'vectors':>9}"
           f"{'last seq':>10}{'snapshot seq':>14}")
-    for shard, replica, server in _servers(state):
-        reply = _server_status(server)
+    for shard, replica, server in servers(state):
+        reply = server_status(server)
         if reply is None:
-            print(f"{shard:>5} {replica:>7}  {_address(server):<17}{'down':<6}")
+            print(f"{shard:>5} {replica:>7}  {address(server):<17}{'down':<6}")
         else:
-            print(f"{shard:>5} {replica:>7}  {_address(server):<17}{'up':<6}{reply.size:>9,}"
+            print(f"{shard:>5} {replica:>7}  {address(server):<17}{'up':<6}{reply.size:>9,}"
                   f"{reply.last_seq:>10}{reply.snapshot_seq:>14}")
-    dataset = state.get("dataset")
-    if dataset and dataset["name"] == "documents":
-        namespaces = {source.get("namespace") for source in dataset["sources"].values()} - {None}
-        spaces = f" in {len(namespaces)} namespace(s)" if namespaces else ""
-        print(f"ingested: {dataset['passages']:,} passages from {len(dataset['sources'])} "
-              f"file(s){spaces}, embedder: {dataset['embedder']}")
-    elif dataset:
-        print(f"loaded: the {dataset['limit']:,} most frequent {dataset['name']} words")
+    if state.get("dataset"):
+        print(describe(state["dataset"]))
     return 0
 
 
-def _writable(state):
-    """Every server's status, after checking that all of them are up to take a write."""
-    replies = [_server_status(server) for _, _, server in _servers(state)]
-    if any(reply is None for reply in replies):
-        raise CliError("a server is down, and writes need every replica; see: vsearch status")
-    return replies
-
-
 def load(args):
-    state = _read_state(args.home)
-    replies = _writable(state)
+    state = read_state(args.home)
+    replies = writable(state)
     if any(reply.size for reply in replies):
-        raise CliError("this cluster already holds vectors; to start over: "
+        raise UserError("this cluster already holds vectors; to start over: "
                        "vsearch cluster down --wipe")
 
     words, vectors = load_glove(args.glove_dir)
     limit = min(args.limit, len(words))
     started = time.perf_counter()
     try:
-        with _coordinator(state) as coordinator:
+        with connect(state) as coordinator:
             for start in range(0, limit, LOAD_BATCH):
                 coordinator.add(vectors[start:min(start + LOAD_BATCH, limit)])
                 print(f"  indexed {min(start + LOAD_BATCH, limit):,} / {limit:,} words")
     except (grpc.RpcError, ReplicasOutOfSyncError) as err:
-        raise CliError(f"load stopped: {err}. Check `vsearch status`, then `vsearch repair`") from None
+        raise UserError(f"load stopped: {err}. Check `vsearch status`, then `vsearch repair`") from None
     state["dataset"] = {"name": "glove", "limit": limit,
                         "dir": str(Path(args.glove_dir).resolve())}
-    _write_state(args.home, state)
+    write_state(args.home, state)
     print(f"loaded {limit:,} words in {time.perf_counter() - started:.1f}s")
     return 0
 
 
 def similar(args):
-    state = _read_state(args.home)
+    state = read_state(args.home)
     dataset = state.get("dataset")
     if not dataset:
-        raise CliError("nothing is loaded yet; run: vsearch load glove")
+        raise UserError("nothing is loaded yet; run: vsearch load glove")
     if dataset["name"] != "glove":
-        raise CliError("this cluster holds documents, not words; use: vsearch search \"...\"")
+        raise UserError("this cluster holds documents, not words; use: vsearch search \"...\"")
     words, vectors = load_glove(dataset["dir"])
     word = args.word.lower()                   # the GloVe 6B vocabulary is lowercase
     try:
         word_id = words.index(word)
     except ValueError:
-        raise CliError(f"{word!r} is not in the GloVe vocabulary") from None
+        raise UserError(f"{word!r} is not in the GloVe vocabulary") from None
 
     started = time.perf_counter()
     try:
-        with _coordinator(state) as coordinator:
+        with connect(state) as coordinator:
             # Ask for one extra: if the word itself is indexed, it comes back first.
             scored = coordinator.search_scored(vectors[word_id], args.k + 1)
             failovers = coordinator.failovers
     except ShardUnavailableError as err:
-        raise CliError(f"{err}; see: vsearch status") from None
+        raise UserError(f"{err}; see: vsearch status") from None
     elapsed_ms = (time.perf_counter() - started) * 1000
 
     neighbors = [(dist, global_id) for dist, global_id in scored if global_id != word_id][:args.k]
@@ -296,80 +239,21 @@ def similar(args):
     return 0
 
 
-def _display_path(path):
-    """A path as the user would write it: relative to where they are, if it is below that."""
-    try:
-        return str(path.relative_to(Path.cwd()))
-    except ValueError:
-        return str(path)
-
-
 def ingest(args):
-    state = _read_state(args.home)
-    replies = _writable(state)
-    dataset = state.get("dataset")
-    if dataset is None:
-        if any(reply.size for reply in replies):
-            raise CliError("this cluster already holds vectors; to start over: "
-                           "vsearch cluster down --wipe")
-        embedder = get_embedder(args.embedder or DEFAULT_EMBEDDER)
-        dataset = {"name": "documents", "embedder": embedder.name, "dim": embedder.dim,
-                   "passages": 0, "sources": {}}
-    elif dataset["name"] != "documents":
-        raise CliError("this cluster holds GloVe words, and vectors from two embedders cannot "
-                       "share an index; start another cluster with --home")
-    elif args.embedder not in (None, dataset["embedder"]):
-        raise CliError(f"this cluster was built with the {dataset['embedder']!r} embedder; "
-                       "every passage in it has to use the same one")
-    else:
-        embedder = get_embedder(dataset["embedder"])
-
-    try:
-        files = find_documents(args.paths)
-    except FileNotFoundError as err:
-        raise CliError(str(err)) from None
-    if not files:
-        raise CliError("found no .md, .markdown, .txt, or .rst files there")
-
-    added = unchanged = 0
+    state = read_state(args.home)
+    replies = writable(state)
     started = time.perf_counter()
-    try:
-        with _coordinator(state) as coordinator:
-            for path in files:
-                shown, digest = _display_path(path), fingerprint(path)
-                # The same file can be ingested into several namespaces, once each.
-                key = f"{args.namespace}::{path}" if args.namespace else str(path)
-                known = dataset["sources"].get(key)
-                if known and known["sha256"] == digest:
-                    unchanged += 1
-                    continue
-                if known:
-                    # The index has no delete yet, so the old passages cannot be replaced.
-                    print(f"  {shown}: changed since it was ingested, skipped "
-                          "(to re-index: vsearch cluster down --wipe)")
-                    continue
-                passages = read_passages(path, source=shown, max_chars=args.chunk_chars,
-                                         overlap=args.overlap)
-                count = ingest_passages(coordinator, embedder, passages,
-                                        namespace=args.namespace)
-                dataset["sources"][key] = {"sha256": digest, "passages": count,
-                                           "namespace": args.namespace}
-                dataset["passages"] += count
-                added += count
-                state["dataset"] = dataset
-                _write_state(args.home, state)     # after every file: a crash loses one at most
-                print(f"  {shown}: {count} passages")
-    except (grpc.RpcError, ReplicasOutOfSyncError) as err:
-        raise CliError(f"ingest stopped: {err}. Check `vsearch status`, then `vsearch repair`") from None
-    except ValueError as err:                      # bad --chunk-chars, --overlap, --namespace
-        raise CliError(str(err)) from None
-    note = f", {unchanged} unchanged file(s) skipped" if unchanged else ""
+    with connect(state) as coordinator:
+        report = ingest_files(
+            args.home, state, coordinator, replies, args.paths, embedder_name=args.embedder,
+            namespace=args.namespace, chunk_chars=args.chunk_chars, overlap=args.overlap,
+            on_file=lambda path, outcome: print(f"  {path}: {outcome}"))
+    note = f", {report.unchanged} unchanged file(s) skipped" if report.unchanged else ""
     into = ""
     if args.namespace:
-        shards = len(state["servers"])
         into = (f" into namespace {args.namespace!r} "
-                f"(shard {shard_for_namespace(args.namespace, shards)} of {shards})")
-    print(f"ingested {added:,} passages{into} in {time.perf_counter() - started:.1f}s{note}")
+                f"(shard {report.shard} of {len(state['servers'])})")
+    print(f"ingested {report.added:,} passages{into} in {time.perf_counter() - started:.1f}s{note}")
     return 0
 
 
@@ -381,7 +265,7 @@ def _parse_where(items):
     for item in items or []:
         field, equals, raw = item.partition("=")
         if not field or not equals:
-            raise CliError(f"--where takes FIELD=VALUE, got {item!r}")
+            raise UserError(f"--where takes FIELD=VALUE, got {item!r}")
         try:
             value = json.loads(raw)
         except ValueError:
@@ -393,27 +277,11 @@ def _parse_where(items):
 
 
 def search(args):
-    state = _read_state(args.home)
-    dataset = state.get("dataset")
-    if not dataset:
-        raise CliError("nothing is ingested yet; run: vsearch ingest PATH")
-    if dataset["name"] != "documents":
-        raise CliError("this cluster holds GloVe words; use: vsearch similar WORD")
-
-    where = _parse_where(args.where)
-    embedder = get_embedder(dataset["embedder"])   # the one the passages were embedded with
-    started = time.perf_counter()
-    query = embedder.embed_query(args.question)
-    embedded = time.perf_counter()
-    try:
-        with _coordinator(state) as coordinator:
-            hits = coordinator.search_hits(query, args.k, where=where, namespace=args.namespace)
-            failovers = coordinator.failovers
-    except ShardUnavailableError as err:
-        raise CliError(f"{err}; see: vsearch status") from None
-    except ValueError as err:                      # a filter the index cannot answer
-        raise CliError(str(err)) from None
-    finished = time.perf_counter()
+    state = read_state(args.home)
+    with connect(state) as coordinator:
+        found = find_passages(state, coordinator, args.question, args.k,
+                              where=_parse_where(args.where), namespace=args.namespace)
+    hits = found.hits
 
     print(f"passages closest to {args.question!r}:")
     if not hits:
@@ -431,18 +299,16 @@ def search(args):
                 snippet = snippet[:SNIPPET_CHARS].rsplit(" ", 1)[0] + " ..."
             print(textwrap.fill(snippet, width=100, initial_indent="     ",
                                 subsequent_indent="     "))
-    note = f", {failovers} failover(s)" if failovers else ""
+    note = f", {found.failovers} failover(s)" if found.failovers else ""
     shards = len(state["servers"])
-    asked = (f"on shard {shard_for_namespace(args.namespace, shards)} of {shards}"
-             if args.namespace else f"across {shards} shards")
-    print(f"(embed {(embedded - started) * 1000:.1f} ms, search {(finished - embedded) * 1000:.1f} ms "
-          f"{asked}{note})")
+    asked = f"on shard {found.shard} of {shards}" if args.namespace else f"across {shards} shards"
+    print(f"(embed {found.embed_ms:.1f} ms, search {found.search_ms:.1f} ms {asked}{note})")
     return 0
 
 
 def repair(args):
-    state = _read_state(args.home)
-    with _coordinator(state) as coordinator:
+    state = read_state(args.home)
+    with connect(state) as coordinator:
         synced = coordinator.repair()
     if not synced:
         print("all reachable replicas are in sync")
@@ -530,7 +396,7 @@ def main(argv=None):
     args.home = args.home.resolve()
     try:
         return args.run(args)
-    except CliError as err:
+    except UserError as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
     except EmbedderUnavailable as err:
