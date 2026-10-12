@@ -138,7 +138,7 @@ vsearch/            the engine
   embedding.py        text -> vector: a local embedding model, or word hashing
   ingest.py           files -> passages -> vectors with payloads
   cli.py              the `vsearch` command
-  protos/shard.proto  the gRPC contract (Add, Search)
+  protos/shard.proto  the gRPC contract (Add, Search, Status, and the resync calls)
 scripts/            gen_protos.sh regenerates the gRPC code from the .proto
 tests/              pytest suite
 benchmarks/         recall / latency / QPS benchmarks
