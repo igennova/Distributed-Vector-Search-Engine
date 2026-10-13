@@ -45,6 +45,7 @@ class Tool(NamedTuple):
     description: str          # what the model reads to decide when to call the tool
     input_schema: dict        # JSON Schema of the arguments (an object)
     handler: Callable         # handler(**arguments) -> text shown to the model
+    mutating: bool = False    # changes something, as opposed to only reading
 
 
 class _RequestError(Exception):
@@ -80,6 +81,20 @@ def check_arguments(schema, arguments):
             if not all(isinstance(item, item_type) for item in value):
                 return f"every item of {name!r} must be of type {rule['items']['type']}"
     return None
+
+
+def run_tool(tool, arguments):
+    """Run one tool call. Returns (text, is_error): a failure comes back as text for the
+    model to read, whether it is a bad argument, a ToolError, or a bug in the tool."""
+    problem = check_arguments(tool.input_schema, arguments)
+    if problem:
+        return f"Cannot call {tool.name}: {problem}.", True
+    try:
+        return tool.handler(**arguments), False
+    except ToolError as err:
+        return str(err), True
+    except Exception as err:                  # a bug in a tool must not end the session
+        return f"{tool.name} failed unexpectedly: {type(err).__name__}: {err}", True
 
 
 class McpServer:
@@ -140,17 +155,8 @@ class McpServer:
         tool = self.tools.get(params.get("name"))
         if tool is None:
             raise _RequestError(INVALID_PARAMS, f"unknown tool: {params.get('name')!r}")
-        arguments = params.get("arguments") or {}
-        problem = check_arguments(tool.input_schema, arguments)
-        if problem:
-            return _tool_result(f"Cannot call {tool.name}: {problem}.", is_error=True)
-        try:
-            return _tool_result(tool.handler(**arguments))
-        except ToolError as err:
-            return _tool_result(str(err), is_error=True)
-        except Exception as err:              # a bug in a tool must not end the session
-            return _tool_result(f"{tool.name} failed unexpectedly: {type(err).__name__}: {err}",
-                                is_error=True)
+        text, is_error = run_tool(tool, params.get("arguments") or {})
+        return _tool_result(text, is_error=is_error)
 
     # --- the session -----------------------------------------------------------------------
 

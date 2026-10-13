@@ -21,10 +21,8 @@ servers' ports and process ids, one data directory per server, and the servers' 
 """
 import argparse
 import json
-import os
 import shutil
 import signal
-import subprocess
 import sys
 import textwrap
 import time
@@ -32,80 +30,17 @@ from pathlib import Path
 
 import grpc
 
-from .client import (REPO_ROOT, ReplicasOutOfSyncError, ShardUnavailableError, free_ports,
-                     server_command, wait_until_ready)
+from .client import ReplicasOutOfSyncError, ShardUnavailableError, free_ports
 from .dataset import load_glove
 from .documents import DEFAULT_EMBEDDER, describe, find_passages, ingest_files
 from .embedding import EMBEDDERS, EmbedderUnavailable
 from .mcp_server import build_server
+from .processes import is_running, pick, spawn, stop, wait_for
 from .state import (UserError, address, connect, read_state, server_status, servers, writable,
                     write_state)
 
 LOAD_BATCH = 10_000
 SNIPPET_CHARS = 240
-_spawned = []     # keep handles to servers started by this process until it exits
-
-
-def _pick(state, shard, replica):
-    try:
-        return state["servers"][shard][replica]
-    except IndexError:
-        raise UserError(f"there is no shard {shard} replica {replica} in this cluster") from None
-
-
-# --- server processes ----------------------------------------------------------------------
-
-def _is_running(server):
-    """True if the recorded pid is still our shard server on the recorded port.
-
-    Process ids are reused by the OS, so a pid is never signalled without checking that it
-    still belongs to the server that was started with it.
-    """
-    pid = server["pid"]
-    if pid is None:
-        return False
-    try:
-        os.waitpid(pid, os.WNOHANG)          # collect it if it was our own child and has exited
-    except ChildProcessError:
-        pass
-    # -ww: never truncate the command line, whatever the terminal width.
-    command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="],
-                             capture_output=True, text=True).stdout
-    return "vsearch.server" in command and f"--port {server['port']}" in command
-
-
-def _spawn(home, state, shard, replica):
-    server = state["servers"][shard][replica]
-    name = f"shard-{shard}-replica-{replica}"
-    (home / "logs").mkdir(parents=True, exist_ok=True)
-    command = server_command(server["port"], seed=state["seed"] + shard, data_dir=home / name,
-                             **state["server_args"])
-    with open(home / "logs" / f"{name}.log", "ab") as log:
-        # A new session detaches the server from this terminal, so it keeps running after
-        # the command returns.
-        process = subprocess.Popen(command, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT,
-                                   start_new_session=True)
-    _spawned.append(process)
-    server["pid"] = process.pid
-
-
-def _wait_for(targets, home):
-    for shard, replica, server in targets:
-        try:
-            wait_until_ready(address(server))
-        except grpc.FutureTimeoutError:
-            raise UserError(f"shard {shard} replica {replica} did not start; see "
-                           f"{home / 'logs' / f'shard-{shard}-replica-{replica}.log'}") from None
-
-
-def _stop(targets, sig):
-    running = [server for server in targets if _is_running(server)]
-    for server in running:
-        os.kill(server["pid"], sig)
-    deadline = time.monotonic() + 10
-    while any(_is_running(server) for server in running) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    return len(running)
 
 
 # --- commands ------------------------------------------------------------------------------
@@ -114,7 +49,7 @@ def cluster_up(args):
     home = args.home
     if (home / "cluster.json").exists():
         state = read_state(home)
-        if any(_is_running(server) for _, _, server in servers(state)):
+        if any(is_running(server) for _, _, server in servers(state)):
             raise UserError("this cluster is already running; see: vsearch status")
         print(f"starting the existing cluster in {home} again (servers recover from disk)")
     else:
@@ -129,15 +64,15 @@ def cluster_up(args):
             "dataset": None,
         }
     for shard, replica, _ in servers(state):
-        _spawn(home, state, shard, replica)
+        spawn(home, state, shard, replica)
     write_state(home, state)
-    _wait_for(servers(state), home)
+    wait_for(servers(state), home)
     return status(args)
 
 
 def cluster_down(args):
     state = read_state(args.home)
-    stopped = _stop([server for _, _, server in servers(state)], signal.SIGTERM)
+    stopped = stop([server for _, _, server in servers(state)], signal.SIGTERM)
     print(f"stopped {stopped} server(s)")
     if args.wipe:
         shutil.rmtree(args.home)
@@ -149,8 +84,8 @@ def cluster_down(args):
 
 def cluster_kill(args):
     state = read_state(args.home)
-    server = _pick(state, args.shard, args.replica)
-    if not _stop([server], signal.SIGKILL):
+    server = pick(state, args.shard, args.replica)
+    if not stop([server], signal.SIGKILL):
         raise UserError(f"shard {args.shard} replica {args.replica} is not running")
     print(f"killed shard {args.shard} replica {args.replica} (SIGKILL, no clean shutdown)")
     return 0
@@ -158,12 +93,12 @@ def cluster_kill(args):
 
 def cluster_restart(args):
     state = read_state(args.home)
-    server = _pick(state, args.shard, args.replica)
-    if _is_running(server):
+    server = pick(state, args.shard, args.replica)
+    if is_running(server):
         raise UserError(f"shard {args.shard} replica {args.replica} is already running")
-    _spawn(args.home, state, args.shard, args.replica)
+    spawn(args.home, state, args.shard, args.replica)
     write_state(args.home, state)
-    _wait_for([(args.shard, args.replica, server)], args.home)
+    wait_for([(args.shard, args.replica, server)], args.home)
     print(f"shard {args.shard} replica {args.replica} is back on {address(server)}")
     return 0
 
