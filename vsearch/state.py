@@ -5,6 +5,7 @@ server both start from it.
 """
 import json
 import os
+from pathlib import Path
 
 import grpc
 
@@ -14,6 +15,28 @@ from .protos import shard_pb2, shard_pb2_grpc
 
 class UserError(Exception):
     """Something to tell the user about, without a traceback."""
+
+
+def load_env_file(path=".env"):
+    """Read KEY=VALUE lines from a file into the environment, for secrets such as API keys
+    that must not be typed on a command line or committed. A variable that is already set
+    wins. Returns the names that were set, never the values."""
+    path = Path(path)
+    if not path.is_file():
+        return []
+    loaded = []
+    for line in path.read_text().splitlines():
+        line = line.strip().removeprefix("export ").strip()
+        name, equals, value = line.partition("=")
+        name, value = name.strip(), value.strip()
+        if not equals or not name or name.startswith("#"):
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if name not in os.environ:
+            os.environ[name] = value
+            loaded.append(name)
+    return loaded
 
 
 def read_state(home):
