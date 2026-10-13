@@ -165,6 +165,73 @@ README.md\nshard 0: replica 0 up (43 vectors, seq 2)\nshard 1: replica 0 up (42 
 so the embedding model is loaded once: the first search of a session took 407 ms and later ones
 a median of 4.5 ms, where every `vsearch search` pays about 390 ms.
 
+### Let an agent keep the cluster healthy
+
+`vsearch ops check` looks at the cluster, repairs what is wrong, and then checks for itself
+whether that worked. What decides the steps is the `--brain`:
+
+- `runbook` (the default) is a fixed procedure: restart whatever is down, repair, test a search.
+- `openai` or `claude` hands the decisions to a model. It gets five tools and chooses each step
+  from what the last one returned.
+
+| Tool | What it does |
+|------|--------------|
+| `cluster_status` | Every server (up or down, vectors, last write) and a list of what is wrong |
+| `restart_server` | Start a server that is down; it recovers its data from its own disk |
+| `repair` | Bring replicas that missed writes up to date from their twin |
+| `read_server_log` | The last lines of a server's log, to find out why it will not start |
+| `probe_search` | One real search across the cluster, to confirm every shard answers |
+
+A model brain reads its API key from the environment or from a `.env` file in the current
+directory (`OPENAI_API_KEY=...`; the file is git-ignored). Here a replica has been killed:
+
+```console
+$ vsearch cluster kill 1 0
+$ vsearch ops check --brain openai
+found 1 problem(s):
+  - shard 1 replica 0 is down
+  -> cluster_status()  [ok]
+       shard 0: replica 0 up (46 vectors, seq 2), replica 1 up (46 vectors, seq 2)
+       shard 1: replica 0 DOWN (127.0.0.1:64155), replica 1 up (46 vectors, seq 2)
+       Problems:
+       - shard 1 replica 0 is down
+  -> restart_server(shard=1, replica=0)  [ok]
+       shard 1 replica 0 restarted and answering: it recovered 46 vectors from its disk and is at seq 2.
+  -> cluster_status()  [ok]
+       ...
+       No problems found: every server answers and replicas agree.
+  -> probe_search()  [ok]
+       A search across all 2 shards answered in 3 ms.
+  [gpt-5.4-mini: 5 turns, 4 tool calls, 4,137 input + 151 output tokens]
+
+report:
+  The issue was that shard 1 replica 0 was down.
+  ...
+checked: the cluster is healthy
+```
+
+The last line is not the model's opinion: after the model stops, the command inspects the
+cluster again and sets its exit code from what it finds. When a replica's snapshot file was
+corrupted so that it could not start, the model tried one restart, read the server's log,
+named the cause, and stopped instead of retrying:
+
+```
+report:
+  Shard 1 replica 1 is down because it fails to start: its stored snapshot is unreadable ...
+  This cannot be fixed with the available tools ... A person will need to inspect or replace
+  the corrupted/incompatible snapshot for shard 1 replica 1 ...
+
+checked: still wrong:
+  - shard 1 replica 1 is down
+```
+
+The agent is limited by what its tools can do, not by what it is asked to do: no tool deletes
+data or stops a server, a server is restarted at most twice per run, the model gets at most 12
+turns, and `--dry-run` describes changes instead of making them. Every model turn and tool call
+is appended to `ops-journal.jsonl` in the cluster's folder. `vsearch ops watch --interval 30`
+repeats the check, and does not try again on a problem it already failed to fix. With a model
+brain, the cluster's status and log excerpts are sent to that model's provider.
+
 ## Project layout
 
 ```
@@ -184,6 +251,10 @@ vsearch/            the engine
   documents.py        a document collection on a cluster: ingest files, search passages
   mcp.py              Model Context Protocol server over stdio (JSON-RPC), tool-agnostic
   mcp_server.py       the engine's MCP tools: search, ingest, status
+  processes.py        start, identify, and stop the shard server processes
+  health.py           one definition of a healthy cluster: facts per server, and problems
+  ops.py              the operator's tools, their journal, and the fixed runbook
+  agent.py            the agent loop, and the models that can drive it
   cli.py              the `vsearch` command
   protos/shard.proto  the gRPC contract (Add, Search, Status, and the resync calls)
 scripts/            gen_protos.sh regenerates the gRPC code from the .proto
@@ -556,7 +627,8 @@ each) because the tenants are the same size; one very large tenant would make it
 - [x] Text ingestion: chunk documents, embed them locally, search by question
 - [x] Metadata filtering, and namespaces that each live on one shard
 - [x] MCP server: search, ingest, and status as tools for an AI assistant
-- [ ] Agent memory, and a self-healing operations agent
+- [x] Operations agent: a model that diagnoses and repairs the cluster with tools
+- [ ] Agent memory
 - [ ] Evaluations for retrieval and agent behavior
 - [ ] Docker / Kubernetes deployment
 

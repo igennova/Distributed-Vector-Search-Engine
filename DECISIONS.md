@@ -532,3 +532,79 @@
   `--read-only`, the refresh before a write, and turning user errors into tool errors. The
   last one survived at first, because the catch-all for crashing tools hid it behind a worse
   message; the test now checks the wording.
+
+## Operations agent
+- Keeping the cluster healthy was a person's job: read `status`, restart what is down, run
+  `repair`. `vsearch ops check` does it, with either a fixed procedure or a model deciding.
+- An agent here is a loop of about 30 lines (`run_agent`): ask the model, run the tools it
+  asks for, hand back the results, until it answers without asking for a tool or runs out of
+  steps. The loop does not know which model it talks to: a model is anything with
+  `begin(system, task, tools)` and `step(outcomes) -> Turn`. There are three: OpenAI, Claude,
+  and a scripted one that replays fixed turns, which is how the loop and tools are tested
+  without a model, a network, or a key.
+- The model gets five dedicated tools with typed arguments, not a shell. A shell command is an
+  opaque string; a `restart_server(shard, replica)` call is something the code can validate,
+  refuse, count, and write down.
+- The limits are enforced in the tools and the loop, not requested in the prompt. No tool
+  deletes data or stops a server. `restart_server` refuses a server that is up, refuses one
+  whose process is still running, and refuses a third attempt on the same server in one run.
+  The loop stops after 12 model turns. `--dry-run` makes the changing tools describe what
+  they would do. A test feeds the loop a model that calls a tool that does not exist, passes
+  a wrong type, restarts a healthy server, and asks for 5,000 log lines: every call comes
+  back as an error it can read, and the cluster is untouched.
+- The model's report is a claim, not a result. After it stops, the command inspects the
+  cluster itself and takes its exit code from that. A test has the model answer "Everything
+  is fixed" without doing anything; the command prints the report, then "still wrong", and
+  exits 1.
+- "Healthy" is defined once (`health.py`): every server answers, and the replicas of each
+  shard have applied the same writes. The status tool, the trigger for the agent, and the
+  final check all use that one definition.
+- Real runs with `gpt-5.4-mini`, one of each, on a 2-shard, 2-replica cluster:
+
+  | Fault | What the model did | Turns | Tokens (in + out) | Result |
+  |-------|--------------------|-------|-------------------|--------|
+  | A replica killed | status, restart, status, probe | 5 | 4,137 + 151 | healthy |
+  | A replica killed while a write was in flight | status, restart, status, repair, status | 6 | 5,298 + 129 | healthy |
+  | A replica with a corrupt snapshot | status, restart (failed), read log, status | 5 | 5,296 + 280 | still down, cause named, handed to a person |
+
+  The first took 11 s end to end. One run each shows the loop works; it says nothing about
+  how often it works. That is what the evaluation step is for.
+- The honest comparison is with the runbook, the fixed procedure a script would follow
+  (restart everything that is down, repair, probe). On the first two faults it reaches the
+  same healthy cluster instantly and for free. The model was only better on the third: the
+  runbook reports "could not restart", while the model read the log, said the snapshot was
+  unreadable, and did not retry. So a script is enough for the faults someone anticipated,
+  and the model earns its cost on the ones nobody wrote a branch for.
+- The third fault also shows the price of the limits. The real fix is to delete the corrupt
+  snapshot and let `repair` rebuild the replica from its twin, exactly as in the lost-disk
+  case, which both brains handle. No tool deletes anything, so the agent stops and says so.
+  A tool for it would have to be guarded (only when the twin is healthy and in sync); not
+  built.
+- Every model turn and every tool call, with arguments and results, is appended to
+  `ops-journal.jsonl`. `ops watch` repeats the check on an interval; if a run leaves problems
+  behind, it does not start another on the same problems, since a second attempt would cost
+  time and tokens and end the same way.
+- OpenAI is called over HTTPS with the standard library: it is one endpoint, so there is
+  nothing to install, and the tests run the client against a local HTTP server that plays
+  the API, exercising the real request and response path. Claude goes through its SDK, which
+  is optional and loaded on use. The Claude client is tested against a stand-in for the SDK
+  and has not been run against the real API.
+- Keys are read from the environment or a git-ignored `.env` file, never from the command
+  line. Error messages from the API have the key removed before they are shown. The test
+  suite cannot reach a real model: for every test the key file is not read, keys are removed
+  from the environment, and the API address points at a closed port.
+- With a model brain, the cluster's status and log excerpts leave the machine.
+- Found while writing the fault tests: a coordinator that starts while a server is down
+  refuses to write at all, because it asks every replica for its position first. A replica
+  only falls behind when it dies during a coordinator's life, so the tests kill it between
+  two writes of the same coordinator.
+- To share code, process management moved out of `cli.py` into `processes.py`, and the MCP
+  server and the agent now run tool calls through the same function.
+- Not done: a server that hangs without exiting is reported, not fixed (nothing here stops a
+  process). There is no approval step before a change other than `--dry-run`. Tools run one
+  at a time.
+- Each check was verified by removing it in a copy of the code and confirming a test fails:
+  the restart limit, dry run, refusing to restart a live server, checking after the report,
+  not retrying in `watch`, unknown tools, the step limit, journaling, removing the key from
+  errors, marking failed tools for the model, and the key file not overriding the
+  environment.
