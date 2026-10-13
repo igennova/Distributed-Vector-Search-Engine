@@ -10,6 +10,9 @@ Command-line interface for running and querying a local cluster.
     vsearch ingest notes/ --namespace alice       keep one user's documents apart, on one shard
     vsearch search "..." --namespace alice        search only that user's documents
     vsearch mcp                                   serve search/ingest/status to an MCP client
+    vsearch ops check                             find what is wrong with the cluster and fix it
+    vsearch ops check --brain openai              the same, with a model deciding what to do
+    vsearch ops watch --interval 30               keep checking, and fix problems as they appear
     vsearch status                                state, size, and write position of every server
     vsearch cluster kill 0 1                      crash shard 0's replica 1
     vsearch cluster restart 0 1                   start it again (it recovers from disk)
@@ -34,10 +37,13 @@ from .client import ReplicasOutOfSyncError, ShardUnavailableError, free_ports
 from .dataset import load_glove
 from .documents import DEFAULT_EMBEDDER, describe, find_passages, ingest_files
 from .embedding import EMBEDDERS, EmbedderUnavailable
+from .agent import (CLAUDE_MODEL, OPENAI_MODEL, ClaudeModel, ModelError, ModelUnavailable,
+                    OpenAIModel, run_agent)
 from .mcp_server import build_server
+from .ops import OPERATOR_PROMPT, Journal, Operations, run_runbook, task_for
 from .processes import is_running, pick, spawn, stop, wait_for
-from .state import (UserError, address, connect, read_state, server_status, servers, writable,
-                    write_state)
+from .state import (UserError, address, connect, load_env_file, read_state, server_status,
+                    servers, writable, write_state)
 
 LOAD_BATCH = 10_000
 SNIPPET_CHARS = 240
@@ -249,6 +255,97 @@ def mcp(args):
     return 0
 
 
+BRAINS = {"openai": OpenAIModel, "claude": ClaudeModel}     # the models that can decide
+
+
+def _show_entry(entry):
+    """Print one journal entry as it is written, so a run can be followed live."""
+    if entry["kind"] == "tool":
+        arguments = ", ".join(f"{name}={value}" for name, value in entry["arguments"].items())
+        mark = "failed" if entry["error"] else "ok"
+        print(f"  -> {entry['tool']}({arguments})  [{mark}]")
+        for line in entry["result"].splitlines()[:6]:
+            print(f"       {line}")
+    elif entry["kind"] == "model" and entry["text"] and entry["calls"]:
+        print(textwrap.indent(entry["text"], "  "))        # the model thinking out loud
+
+
+def _check_once(args, journal):
+    """One round: look, let the brain work if something is wrong, then verify for ourselves.
+    Returns the problems that are left."""
+    ops = Operations(args.home, journal, dry_run=args.dry_run)
+    problems = ops.problems()
+    if not problems:
+        return []
+    print(f"found {len(problems)} problem(s):")
+    for problem in problems:
+        print(f"  - {problem}")
+    journal.write("check", problems=problems, brain=args.brain, dry_run=args.dry_run)
+
+    if args.brain == "runbook":
+        report = run_runbook(ops)
+    else:
+        model = BRAINS[args.brain](*([args.model] if args.model else []))
+        run = run_agent(model, ops.tools(), task_for(problems), OPERATOR_PROMPT,
+                        max_steps=args.max_steps, journal=journal)
+        report = run.report if run.finished else (
+            f"(stopped at the limit of {args.max_steps} steps before finishing)\n{run.report}")
+        print(f"  [{model.model}: {run.steps} turns, {run.calls} tool calls, "
+              f"{model.input_tokens:,} input + {model.output_tokens:,} output tokens]")
+    print(f"\nreport:\n{textwrap.indent(report, '  ')}\n")
+
+    # The report is a claim. Whether the cluster is healthy is checked here, independently.
+    remaining = ops.problems()
+    journal.write("verdict", healthy=not remaining, problems=remaining)
+    if args.dry_run:
+        print("dry run: nothing was changed")
+    elif remaining:
+        print("checked: still wrong:")
+        for problem in remaining:
+            print(f"  - {problem}")
+    else:
+        print("checked: the cluster is healthy")
+    return remaining
+
+
+def ops_check(args):
+    read_state(args.home)
+    journal = Journal(args.home / "ops-journal.jsonl", on_entry=_show_entry)
+    if not Operations(args.home).problems():
+        print("the cluster is healthy: nothing to do")
+        return 0
+    remaining = _check_once(args, journal)
+    return 1 if remaining and not args.dry_run else 0
+
+
+def ops_watch(args):
+    read_state(args.home)
+    journal = Journal(args.home / "ops-journal.jsonl", on_entry=_show_entry)
+    print(f"watching the cluster every {args.interval:g} s (Ctrl-C to stop)")
+    gave_up_on = None          # problems the brain already failed to fix
+    rounds = 0
+    try:
+        while args.rounds is None or rounds < args.rounds:
+            if rounds:
+                time.sleep(args.interval)
+            rounds += 1
+            problems = Operations(args.home).problems()
+            if not problems:
+                gave_up_on = None
+            elif problems == gave_up_on:
+                # Trying the same thing again costs time (and, with a model, money) and
+                # would not end differently. Wait for the situation to change.
+                continue
+            else:
+                remaining = _check_once(args, journal)
+                gave_up_on = remaining or None
+                if remaining and not args.dry_run:
+                    print("leaving these for a person; not retrying until something changes")
+    except KeyboardInterrupt:
+        print("stopped")
+    return 0
+
+
 def repair(args):
     state = read_state(args.home)
     with connect(state) as coordinator:
@@ -332,6 +429,26 @@ def build_parser():
                                "source=README.md; repeat a field to accept several values")
     searcher.set_defaults(run=search)
 
+    ops = commands.add_parser("ops", help="find and fix problems in the cluster")
+    ops_actions = ops.add_subparsers(dest="action", required=True)
+    for name, run, text in [("check", ops_check, "look once, fix what is wrong, verify"),
+                            ("watch", ops_watch, "keep checking, and fix problems as they appear")]:
+        action = ops_actions.add_parser(name, help=text)
+        action.add_argument("--brain", choices=["runbook", *BRAINS], default="runbook",
+                            help="what decides the steps: a fixed procedure, or a model choosing "
+                                 "its own (openai needs OPENAI_API_KEY; claude needs the "
+                                 "anthropic package and ANTHROPIC_API_KEY)")
+        action.add_argument("--model", help=f"model id (default: {OPENAI_MODEL} for openai, "
+                                            f"{CLAUDE_MODEL} for claude)")
+        action.add_argument("--max-steps", type=int, default=12,
+                            help="most turns the model may take in one round")
+        action.add_argument("--dry-run", action="store_true",
+                            help="describe the changes instead of making them")
+        action.set_defaults(run=run)
+        if name == "watch":
+            action.add_argument("--interval", type=float, default=30.0, help="seconds between checks")
+            action.add_argument("--rounds", type=int, help="stop after this many checks")
+
     server = commands.add_parser(
         "mcp", help="serve this cluster to an MCP client over stdin/stdout")
     server.add_argument("--read-only", action="store_true",
@@ -346,9 +463,13 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     args.home = args.home.resolve()
+    load_env_file()                            # API keys kept in ./.env, out of the shell history
     try:
         return args.run(args)
     except UserError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    except (ModelUnavailable, ModelError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
     except EmbedderUnavailable as err:
