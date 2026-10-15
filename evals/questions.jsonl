@@ -1,0 +1,40 @@
+{"kind": "keyword", "question": "Why does each write-ahead log record carry a crc32 checksum?", "section": "Durability: snapshots + write-ahead log"}
+{"kind": "keyword", "question": "What is F_FULLFSYNC on macOS and how much does it cost per append?", "section": "Durability: snapshots + write-ahead log"}
+{"kind": "keyword", "question": "How does FetchSnapshot stream a snapshot under gRPC's 4 MB limit?", "section": "Replica resync"}
+{"kind": "keyword", "question": "When does the coordinator raise ReplicasOutOfSyncError before a write?", "section": "Replica resync"}
+{"kind": "keyword", "question": "Why did threads cause thousands of context switches because of the GIL?", "section": "Parallel fan-out"}
+{"kind": "keyword", "question": "Why are uploads chunked to at most 2 MB per gRPC request?", "section": "Shards as gRPC services"}
+{"kind": "keyword", "question": "What does search_partial return when every replica of a shard is down?", "section": "Replication and failover"}
+{"kind": "keyword", "question": "What recall did the diversity heuristic reach at ef 50, 100 and 200 on GloVe?", "section": "Neighbor selection: diversity heuristic"}
+{"kind": "keyword", "question": "What did cProfile show about np.linalg.norm during the index build?", "section": "Faster distance computation"}
+{"kind": "keyword", "question": "Why does the hashing embedder use crc32 instead of Python's hash() of a string?", "section": "Text ingestion"}
+{"kind": "keyword", "question": "When does a shard use exact search instead of the graph walk for a filtered search, and what is EXACT_ADVANTAGE?", "section": "Metadata filtering"}
+{"kind": "keyword", "question": "Which shard does a namespace's data go to, and why is crc32 used for it?", "section": "Namespaces"}
+{"kind": "keyword", "question": "How does the MCP server negotiate the protocol version in initialize?", "section": "MCP server"}
+{"kind": "keyword", "question": "What do the restart_server tool's limits and the step limit of the operations agent prevent?", "section": "Operations agent"}
+{"kind": "keyword", "question": "Why did computing 1.0 - float(dot) in float64 make one distance differ after crossing gRPC?", "section": "Floating-point details found while testing payloads"}
+{"kind": "keyword", "question": "Why is payload text stored as one byte blob with offsets instead of being pickled?", "section": "Payloads"}
+{"kind": "keyword", "question": "How does cluster.json record the servers' ports and process ids for the command line?", "section": "Command-line interface"}
+{"kind": "keyword", "question": "What recall, p50 latency and QPS did the brute-force baseline give at 10k vectors?", "section": "Brute-force baseline"}
+{"kind": "keyword", "question": "Why is round-robin by global id used to partition vectors across shards?", "section": "Sharding (scatter-gather)"}
+{"kind": "keyword", "question": "How much memory do 100k GloVe vectors take in the HNSW index?", "section": "Real data: GloVe word vectors"}
+{"kind": "paraphrase", "question": "What happens if the computer loses power in the middle of saving?", "section": "Durability: snapshots + write-ahead log"}
+{"kind": "paraphrase", "question": "How does a copy that missed some updates get them back from its twin?", "section": "Replica resync"}
+{"kind": "paraphrase", "question": "Why was running searches side by side inside one program slower than doing them one after another?", "section": "Parallel fan-out"}
+{"kind": "paraphrase", "question": "Why must every partition send back its own complete list of best matches?", "section": "Sharding (scatter-gather)"}
+{"kind": "paraphrase", "question": "What keeps answering queries when one machine suddenly dies?", "section": "Replication and failover"}
+{"kind": "paraphrase", "question": "Why do the machines exchange a compact binary format instead of readable text?", "section": "Shards as gRPC services"}
+{"kind": "paraphrase", "question": "What made constructing the index several times quicker?", "section": "Faster distance computation"}
+{"kind": "paraphrase", "question": "Was the approximate method really ten times quicker than comparing against everything?", "section": "Real data: GloVe word vectors"}
+{"kind": "paraphrase", "question": "How are a point's links chosen so that they lead in different directions?", "section": "Neighbor selection: diversity heuristic"}
+{"kind": "paraphrase", "question": "How do I start and stop all the servers from my terminal?", "section": "Command-line interface"}
+{"kind": "paraphrase", "question": "How does a result come back with the original text and where it came from?", "section": "Payloads"}
+{"kind": "paraphrase", "question": "Why did two copies give answers that differed in the eighth decimal place?", "section": "Floating-point details found while testing payloads"}
+{"kind": "paraphrase", "question": "Why cut long documents into small pieces before turning them into numbers?", "section": "Text ingestion"}
+{"kind": "paraphrase", "question": "Why not simply throw away the non-matching results after an ordinary search?", "section": "Metadata filtering"}
+{"kind": "paraphrase", "question": "How can one customer's data be kept apart and found without asking every machine?", "section": "Namespaces"}
+{"kind": "paraphrase", "question": "How can a chat assistant use this engine directly?", "section": "MCP server"}
+{"kind": "paraphrase", "question": "What stops the automated repairer from doing something dangerous?", "section": "Operations agent"}
+{"kind": "paraphrase", "question": "What mistake in measuring closeness was caught early on, and how?", "section": "Brute-force baseline"}
+{"kind": "paraphrase", "question": "How does the layered structure find nearby points, and which setting trades accuracy for speed?", "section": "HNSW index (graph-based ANN)"}
+{"kind": "paraphrase", "question": "How much slower did building get when every partition was kept twice?", "section": "Replication and failover"}
