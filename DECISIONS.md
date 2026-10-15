@@ -608,3 +608,77 @@
   not retrying in `watch`, unknown tools, the step limit, journaling, removing the key from
   errors, marking failed tools for the model, and the key file not overriding the
   environment.
+
+## Evaluations
+- One run per fault showed the agent can work, not how often it does. A model does not take
+  the same steps every time, so reliability has to be measured over many runs.
+- Operations eval: each run starts a fresh 2-shard, 2-replica cluster, breaks it in a known
+  way, lets a brain work, and grades with code. Success needs both the right end state and an
+  honest claim: the report ends with `Outcome: fixed / needs a person / nothing wrong`, and it
+  has to match what the final check finds. A report without that line counts as a wrong
+  claim. For the false alarm, success means changing nothing; for the corrupted snapshot, it
+  means stopping within the restart limit and saying a person is needed. API errors are
+  recorded separately and never count as successes.
+- Seven faults: a killed replica, one killed during a write (it needs a repair after its
+  restart), one that lost its disk, one replica down in each shard, both replicas of a shard
+  down, a corrupted snapshot, and a false alarm (the report says a replica is down; nothing is).
+- Results, 10 runs per fault for each of two prompts with `gpt-5.4-mini`, 3 per fault for the
+  runbook:
+
+  | Brain | Success | Claims correct | Read the broken server's log | Median turns | Tool calls | Tokens |
+  |-------|---------|----------------|------------------------------|--------------|------------|--------|
+  | careful prompt | 70/70 | 70/70 | 10/10 | 5 | 4.5 | 5,120 |
+  | lean prompt    | 70/70 | 70/70 | 10/10 | 5 | 4.0 | 4,721 |
+  | runbook        | 21/21 | 21/21 | 0/3   | - | 4.1 | 0     |
+
+  With 70 of 70, the 95% interval (Wilson) is 95–100% for each prompt overall, and 72–100%
+  for any single fault. All 140 model runs together used 668,397 input and 20,488 output
+  tokens, about $0.60 at the listed prices; the median run took 7 s of agent time, against
+  1.5 s for the runbook.
+- The eval is too easy to separate the brains on success: the runbook also passes every fault.
+  What separates them is what happens on the fault nobody wrote a branch for. On the corrupted
+  snapshot the model read that server's log in 10 of 10 runs and named the cause; the runbook
+  reports that the restart failed and nothing more. Harder faults are the next step: a server
+  that hangs without exiting, a port taken by another process, two faults where order matters,
+  and a report that names the wrong server.
+- The lean prompt ("act on the listed problems at once, ask for several tools in one turn,
+  verify once") was meant to cut turns. It did not: the median stayed at 5. The model made
+  about one tool call per turn under both prompts (1.0 to 1.3 calls per acting turn), and
+  under the lean prompt it still began with `cluster_status`. What the prompt changed was
+  where the turns went: it called `repair` right after a restart, which saved a turn when a
+  replica had missed writes (6–7 turns down to 5) and added an unneeded one after a plain
+  restart (9 of 10 dead-replica runs). Net, 8% fewer tokens. The habit of one call per turn
+  came from the model, not the prompt.
+- In 2 of the 10 corrupted-snapshot runs under each prompt, the model restarted the server a
+  second time after reading its log, although the prompt says not to retry blindly. The limit
+  of 2 restarts in the code is what bounded it. That is the measured argument for enforcing
+  limits in code rather than asking for them in the prompt.
+- Retrieval eval: 40 questions about the design notes (a frozen copy in `evals/corpus`, so
+  later edits to the notes do not move the scores), each labelled with its section. Half
+  reuse that section's words; half were written to avoid them. Passages are ranked by exact
+  cosine similarity, so it measures the embedder and the chunking, not the index.
+
+  | Embedder, passage size, headings | Keyword hit@1 | Paraphrase hit@1 | Paraphrase hit@5 | MRR (all) |
+  |----------------------------------|---------------|------------------|------------------|-----------|
+  | hash, 1000, yes      | 90% | 15% | 85% | 0.68 |
+  | bge-small, 1000, yes | 85% | 40% | 85% | 0.73 |
+  | bge-small, 500, yes  | 90% | 45% | 85% | 0.78 |
+  | bge-small, 1000, no  | 85% | 40% | 90% | 0.74 |
+
+  Word matching is as good as the model when the question uses the document's words, and
+  nearly useless at rank 1 when it does not; the model is better there by almost 3x. Both
+  find the right section in the top five about as often. Each question is 5 points of a
+  kind's score, so the passage-size and heading differences (one or two questions) are noise.
+- Correction: the text-ingestion notes say embedding the headings helped the model at every
+  passage size, from 14 questions. On these 40 it made no difference (hit@1 62% either way).
+  That earlier result does not hold up.
+- The questions were written by the author of the notes, who knows their wording, so these
+  scores are likely higher than other people's questions would get.
+- The evals have tests of their own, because a grading bug reports a wrong number with
+  confidence. Each grading rule was verified by removing it in a copy of the code and
+  confirming a test fails: requiring an honest claim, the restart limit on the unfixable
+  fault, changing nothing on a false alarm, reading the right server's log, excluding API
+  errors, the interval formula, and the rank calculation. The false-alarm rule survived at
+  first, because no test had an agent restart a healthy server; one does now.
+- The tests can never reach a real model or use a real key, so the paid runs are only ever
+  started by hand.

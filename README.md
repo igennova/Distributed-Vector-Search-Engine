@@ -256,6 +256,7 @@ vsearch/            the engine
   ops.py              the operator's tools, their journal, and the fixed runbook
   agent.py            the agent loop, and the models that can drive it
   cli.py              the `vsearch` command
+evals/              ops_eval.py (fault scenarios, grading, results), retrieval_eval.py
   protos/shard.proto  the gRPC contract (Add, Search, Status, and the resync calls)
 scripts/            gen_protos.sh regenerates the gRPC code from the .proto
 tests/              pytest suite
@@ -611,6 +612,48 @@ One request instead of four makes a tenant's search about 1.8x faster here, and 
 takes down only the tenants stored on it. The shards stayed balanced (24,500 to 25,500 vectors
 each) because the tenants are the same size; one very large tenant would make its shard large.
 
+### Evaluations
+
+`evals/` measures the two things a single demo cannot show: how reliably the operations agent
+repairs a cluster, and how often search finds the passage that answers a question.
+
+**Operations agent.** Each run starts a fresh 2-shard, 2-replica cluster, breaks it in one of
+seven ways, lets a brain work, and grades the result in code: the cluster ends in the right
+state, and the report's `Outcome:` line matches what happened. 10 runs per fault for each
+prompt with `gpt-5.4-mini`, 3 for the runbook:
+
+| Brain | Success | Claims correct | Read the right log (corrupt file) | Median turns | Tokens per run |
+|-------|---------|----------------|-----------------------------------|--------------|----------------|
+| Model, careful prompt | 70/70 | 70/70 | 10/10 | 5 | 5,120 |
+| Model, lean prompt    | 70/70 | 70/70 | 10/10 | 5 | 4,721 |
+| Runbook               | 21/21 | 21/21 | 0/3   | - | 0     |
+
+The faults: a killed replica, one killed during a write (needs repair after the restart), one
+that lost its disk, one down in each shard, a whole shard down, a corrupted snapshot (cannot
+be fixed with the tools; the right answer is to stop and hand over), and a false alarm. With
+no failures in 70 runs, the 95% interval for the model's success rate is 95–100%. All 140
+model runs used 690,000 tokens, about $0.60, and every transcript is kept in `evals/results/`.
+
+```bash
+python -m evals.ops_eval --brain runbook --runs 3
+python -m evals.ops_eval --brain openai --prompt lean --runs 10      # uses OPENAI_API_KEY
+python -m evals.ops_eval --summary evals/results/*.jsonl
+```
+
+**Retrieval.** 40 questions about the design notes, each labelled with the section that
+answers it. Half reuse that section's words, half are paraphrased:
+
+| Embedder | Keyword: right section first | Paraphrased: right section first | In the top 5 (all) |
+|----------|------------------------------|----------------------------------|--------------------|
+| `hash` (shared words) | 90% | 15% | 92% |
+| `bge-small`           | 85% | 40% | 92% |
+
+The embedding model matters exactly where the question uses different words from the text.
+
+```bash
+python -m evals.retrieval_eval
+```
+
 ## Roadmap
 
 - [x] Exact brute-force cosine baseline + benchmark harness
@@ -629,7 +672,7 @@ each) because the tenants are the same size; one very large tenant would make it
 - [x] MCP server: search, ingest, and status as tools for an AI assistant
 - [x] Operations agent: a model that diagnoses and repairs the cluster with tools
 - [ ] Agent memory
-- [ ] Evaluations for retrieval and agent behavior
+- [x] Evaluations: agent reliability over 140 runs, and retrieval on 40 labelled questions
 - [ ] Docker / Kubernetes deployment
 
 ## Design notes
