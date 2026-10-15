@@ -40,7 +40,7 @@ from .embedding import EMBEDDERS, EmbedderUnavailable
 from .agent import (CLAUDE_MODEL, OPENAI_MODEL, ClaudeModel, ModelError, ModelUnavailable,
                     OpenAIModel, run_agent)
 from .mcp_server import build_server
-from .ops import OPERATOR_PROMPT, Journal, Operations, run_runbook, task_for
+from .ops import PROMPTS, Journal, Operations, claimed_outcome, run_runbook, task_for
 from .processes import is_running, pick, spawn, stop, wait_for
 from .state import (UserError, address, connect, load_env_file, read_state, server_status,
                     servers, writable, write_state)
@@ -286,7 +286,7 @@ def _check_once(args, journal):
         report = run_runbook(ops)
     else:
         model = BRAINS[args.brain](*([args.model] if args.model else []))
-        run = run_agent(model, ops.tools(), task_for(problems), OPERATOR_PROMPT,
+        run = run_agent(model, ops.tools(), task_for(problems), PROMPTS[args.prompt],
                         max_steps=args.max_steps, journal=journal)
         report = run.report if run.finished else (
             f"(stopped at the limit of {args.max_steps} steps before finishing)\n{run.report}")
@@ -296,7 +296,10 @@ def _check_once(args, journal):
 
     # The report is a claim. Whether the cluster is healthy is checked here, independently.
     remaining = ops.problems()
-    journal.write("verdict", healthy=not remaining, problems=remaining)
+    claim = claimed_outcome(report)
+    journal.write("verdict", healthy=not remaining, problems=remaining, claimed=claim)
+    if not args.dry_run and claim == "fixed" and remaining:
+        print("note: the report says it is fixed, but the check below disagrees")
     if args.dry_run:
         print("dry run: nothing was changed")
     elif remaining:
@@ -440,6 +443,9 @@ def build_parser():
                                  "anthropic package and ANTHROPIC_API_KEY)")
         action.add_argument("--model", help=f"model id (default: {OPENAI_MODEL} for openai, "
                                             f"{CLAUDE_MODEL} for claude)")
+        action.add_argument("--prompt", choices=sorted(PROMPTS), default="careful",
+                            help="working rules given to the model: check before and after every "
+                                 "change (careful), or act at once and verify at the end (lean)")
         action.add_argument("--max-steps", type=int, default=12,
                             help="most turns the model may take in one round")
         action.add_argument("--dry-run", action="store_true",

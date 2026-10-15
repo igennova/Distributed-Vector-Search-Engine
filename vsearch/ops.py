@@ -11,6 +11,7 @@ same journal:
   - with dry_run, actions that would change something are described instead of done
 """
 import json
+import re
 import time
 from collections import Counter
 
@@ -31,8 +32,11 @@ SERVER = {
 }
 NO_ARGUMENTS = {"type": "object", "properties": {}}
 
-# What a model is told before it is handed the tools.
-OPERATOR_PROMPT = """\
+# What a model is told before it is handed the tools: how the system behaves, a set of
+# working rules, and how to end. Two sets of rules are kept, to measure against each other
+# (evals/ops_eval.py): "careful" looks before and after every change; "lean" acts on the
+# listed problems at once and verifies at the end, which takes fewer turns.
+_SYSTEM = """\
 You operate a small distributed vector search cluster. Its data is split over several \
 shards, and each shard has one or more replicas: identical copies on different servers. The \
 cluster is healthy when every server answers and the replicas of each shard have applied \
@@ -47,16 +51,48 @@ How the system behaves:
 repair tool copies the missing writes from the most advanced replica of the same shard. \
 Repair only reaches replicas that are up, so restart first.
 - Searches fail for a shard only when all of its replicas are down.
+"""
 
+_RULES = {
+    "careful": """\
 Rules:
 - Look before you act: start with cluster_status, and check it again after every change.
 - If a restart fails, read that server's log before doing anything else. Do not retry blindly.
 - You cannot delete data, stop servers, or change configuration. If the fix needs any of \
 that, say so in your report instead of trying something else.
 - Stop when the cluster is healthy, or when nothing more can be done with your tools.
+""",
+    "lean": """\
+Rules:
+- Act on the problems listed in the task straight away. You may ask for several tools in \
+one turn; they run in the order you give. Repair does nothing when replicas already agree, \
+so it is safe to ask for it right after restarts.
+- When you have made your changes, call cluster_status once to verify them.
+- If a restart fails, read that server's log before doing anything else. Do not retry blindly.
+- You cannot delete data, stop servers, or change configuration. If the fix needs any of \
+that, say so in your report instead of trying something else.
+- Stop when the cluster is healthy, or when nothing more can be done with your tools.
+""",
+}
 
+_FINISH = """
 Finish with a short report in plain words: what was wrong, what you did, the state now, and \
-anything a person still needs to do."""
+anything a person still needs to do. End the report with exactly one of these lines:
+Outcome: fixed
+Outcome: needs a person
+Outcome: nothing wrong"""
+
+PROMPTS = {name: _SYSTEM + "\n" + rules + _FINISH for name, rules in _RULES.items()}
+OPERATOR_PROMPT = PROMPTS["careful"]
+OUTCOMES = ("fixed", "needs a person", "nothing wrong")
+_OUTCOME_LINE = re.compile(r"^\W*outcome\W*:\W*(fixed|needs a person|nothing wrong)\W*$",
+                           re.IGNORECASE | re.MULTILINE)
+
+
+def claimed_outcome(report):
+    """What a report says happened (one of OUTCOMES), or None if it does not say."""
+    found = _OUTCOME_LINE.findall(report or "")
+    return found[-1].lower() if found else None
 
 
 def task_for(problems):
@@ -259,4 +295,7 @@ def run_runbook(ops):
     except ToolError as err:
         notes.append(str(err))
     tools["probe_search"]()
-    return "Runbook: " + ("; ".join(notes) if notes else "nothing needed doing") + "."
+    outcome = ("needs a person" if any(note.startswith("could not") for note in notes)
+               else "fixed" if notes else "nothing wrong")
+    return ("Runbook: " + ("; ".join(notes) if notes else "nothing needed doing") +
+            f".\nOutcome: {outcome}")
