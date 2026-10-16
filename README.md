@@ -165,6 +165,31 @@ README.md\nshard 0: replica 0 up (43 vectors, seq 2)\nshard 1: replica 0 up (42 
 so the embedding model is loaded once: the first search of a session took 407 ms and later ones
 a median of 4.5 ms, where every `vsearch search` pays about 390 ms.
 
+### Give an assistant a long-term memory
+
+A model forgets everything when a conversation ends. `vsearch memory` keeps facts in a cluster
+of their own and recalls them by meaning, so "how should I explain things to him?" finds
+"likes his explanations in simple language with analogies":
+
+```console
+$ vsearch --home data/memory cluster up --shards 2 --replicas 2
+$ vsearch --home data/memory memory remember "Rahul likes his explanations in simple language with analogies." --owner rahul
+remembered as m6d6a64525c
+$ vsearch --home data/memory memory recall "how should I explain things to him?" --owner rahul
+  m6d6a64525c  0.574  just now        Rahul likes his explanations in simple language with analogies.
+  ...
+```
+
+Each owner's memories are a namespace, so they sit on one shard and stay separate from
+everyone else's. When a fact changes, `remember ... --replaces ID` stores the new one and the
+old one is no longer recalled; `forget ID` stops recalling a fact. Saving a fact that is
+already stored returns the existing id. Among facts that match about equally well, newer ones
+rank first. Over MCP, `vsearch --home data/memory mcp --memory --owner rahul` gives an assistant
+`remember`, `recall`, and `forget` as tools.
+
+The engine cannot delete yet, so a forgotten or replaced fact is hidden, not erased: its text
+stays on disk in the write-ahead log and the snapshots.
+
 ### Let an agent keep the cluster healthy
 
 `vsearch ops check` looks at the cluster, repairs what is wrong, and then checks for itself
@@ -254,6 +279,7 @@ vsearch/            the engine
   processes.py        start, identify, and stop the shard server processes
   health.py           one definition of a healthy cluster: facts per server, and problems
   ops.py              the operator's tools, their journal, and the fixed runbook
+  memory.py           an agent's long-term memory: remember, recall, forget
   agent.py            the agent loop, and the models that can drive it
   cli.py              the `vsearch` command
 evals/              ops_eval.py (fault scenarios, grading, results), retrieval_eval.py
@@ -671,7 +697,7 @@ python -m evals.retrieval_eval
 - [x] Metadata filtering, and namespaces that each live on one shard
 - [x] MCP server: search, ingest, and status as tools for an AI assistant
 - [x] Operations agent: a model that diagnoses and repairs the cluster with tools
-- [ ] Agent memory
+- [x] Agent memory: remember, recall by meaning, replace and forget
 - [x] Evaluations: agent reliability over 140 runs, and retrieval on 40 labelled questions
 - [ ] Docker / Kubernetes deployment
 

@@ -682,3 +682,51 @@
   first, because no test had an agent restart a healthy server; one does now.
 - The tests can never reach a real model or use a real key, so the paid runs are only ever
   started by hand.
+
+## Agent memory
+- A model starts every conversation knowing nothing about earlier ones. Memory gives it three
+  operations: `remember` a fact in one sentence, `recall` the facts relevant to a query, and
+  `forget` one. It is built entirely from parts that already existed: each fact is embedded
+  and stored with its text, tags, and time as the payload, each owner's facts are a
+  namespace (one shard, separate from other owners), and the bookkeeping below is done with
+  filters.
+- Facts change, and the engine has no delete. So a new fact can name the facts it replaces,
+  and `forget` writes a record that names its target. Recall fetches its candidates, then
+  makes one filtered lookup for records that replace any of them, and drops those. Nothing
+  is ever removed: a forgotten fact is no longer recalled, but its text is still in the
+  write-ahead log and the snapshots. For a memory of personal facts that is a real gap;
+  erasing needs a delete in the engine and a compaction that rewrites the log and snapshot.
+- Measured with the embedding model, to set the thresholds:
+
+  | Pair of facts | Similarity |
+  |---------------|------------|
+  | the same sentence, punctuation aside | 0.984 |
+  | a paraphrase ("short answers with examples" / "brief replies that include examples") | 0.908 |
+  | an update ("lives in Delhi" / "moved to Bangalore") | 0.812 |
+  | a change ("favourite colour is blue" / "is green") | 0.814 |
+  | unrelated ("prefers short answers" / "lives in Delhi") | 0.666 |
+
+  Embeddings measure what a fact is about, not whether it is still true: an update is as
+  close to the old fact as two different facts about the same topic. So similarity cannot
+  tell that "moved to Bangalore" replaces "lives in Delhi"; the agent has to say so, with
+  `replaces`. A new fact at 0.97 or more from a stored one is treated as the same fact and
+  not stored again. That catches repeats, not paraphrases, which sit at 0.91, too close to
+  genuinely different facts to merge automatically.
+- Recall ranks by similarity plus a recency bonus of up to 0.03, halving every 30 days. In a
+  small trial the gap between a relevant fact and an unrelated one was often only 0.05 to
+  0.1, so a bigger bonus (0.1 was the first choice) would let any fresh fact outrank an older,
+  more relevant one. At 0.03 recency only reorders near-ties, such as two versions of a fact
+  stored without `replaces`. A tuned value would need an eval of its own.
+- Recall looks at 4 x k candidates before dropping replaced ones and re-ranking. If more
+  than that are replaced, it returns fewer than k.
+- A cluster holds documents, GloVe words, or memories, never a mix, as before: they are made
+  by different embedders, and a passage search should not return someone's personal facts.
+- Over MCP, the owner is fixed when the server starts (`--owner`), not chosen by the model, so
+  a model using one owner's memory cannot read or change another's.
+- Found while testing: after `close()`, the memory store and the MCP server kept the address
+  list of their old connection, so the next call found "already connected" and used a closed
+  coordinator. Both now forget the addresses on close; a test makes a call after closing.
+- Each check was verified by removing it in a copy of the code and confirming a test fails:
+  dropping replaced facts, dropping forgotten ones, not storing a repeat, the recency bonus,
+  separate owners, refusing to replace an unknown id, reconnecting after close, and keeping
+  memories out of a documents cluster.
