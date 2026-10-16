@@ -1,9 +1,14 @@
 """
-The engine as MCP tools, so an AI application can use it directly:
+The engine as MCP tools, so an AI application can use it directly. Over a cluster of
+documents:
 
     search   find the passages that answer a question
     ingest   add documents to the index
     status   which servers are up, and what is indexed
+
+or, with --memory, as the long-term memory of one owner (see memory.py):
+
+    remember, recall, forget
 
 Run it with `vsearch --home DIR mcp`; the client starts that command and talks to it over
 stdin and stdout (see mcp.py for the protocol). The cluster itself is started separately
@@ -18,6 +23,7 @@ from pathlib import Path
 from .documents import describe, find_passages, ingest_files, namespaces
 from .embedding import EmbedderUnavailable, get_embedder
 from .mcp import McpServer, Tool, ToolError
+from .memory import MemoryStore, describe_age
 from .state import UserError, address, connect, read_state, server_status, shard_addresses, writable
 
 MAX_RESULTS = 20
@@ -90,7 +96,7 @@ class Engine:
     def close(self):
         if self._coordinator is not None:
             self._coordinator.close()
-            self._coordinator = None
+            self._coordinator = self._addresses = None
 
     # --- tools -----------------------------------------------------------------------------
 
@@ -174,6 +180,91 @@ class Engine:
             return function(*args, **kwargs)
         except (UserError, EmbedderUnavailable) as err:
             raise ToolError(str(err)) from None
+
+
+REMEMBER = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string", "description":
+                 "The fact, as one short self-contained sentence, e.g. \"Rahul prefers short "
+                 "answers with examples.\""},
+        "tags": {"type": "array", "items": {"type": "string"}, "description":
+                 "Optional labels to recall by later, e.g. [\"preference\"]."},
+        "replaces": {"type": "array", "items": {"type": "string"}, "description":
+                     "Ids of remembered facts this one makes out of date; they will no "
+                     "longer be recalled."},
+    },
+    "required": ["text"],
+}
+
+RECALL = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "description":
+                  "What you need to know, as a question or sentence. Matches meaning."},
+        "k": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS, "description":
+              "How many facts to return. Default 5."},
+        "tags": {"type": "array", "items": {"type": "string"}, "description":
+                 "Only facts with at least one of these labels."},
+    },
+    "required": ["query"],
+}
+
+FORGET = {
+    "type": "object",
+    "properties": {"memory_id": {"type": "string", "description": "The id recall showed."}},
+    "required": ["memory_id"],
+}
+
+
+def build_memory_server(home, owner="default", embedder=None):
+    """An MCP server that is the long-term memory of `owner`. The owner is fixed when the
+    server starts: a model using it cannot reach anyone else's memories."""
+    store = MemoryStore(home, owner, embedder=embedder)
+
+    def run(function, *args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except (UserError, EmbedderUnavailable) as err:
+            raise ToolError(str(err)) from None
+
+    def remember(text, tags=(), replaces=()):
+        memory_id, stored = run(store.remember, text, tags, replaces)
+        return (f"Remembered as {memory_id}." if stored else
+                f"Already remembered as {memory_id}; nothing new was stored.")
+
+    def recall(query, k=5, tags=None):
+        memories = run(store.recall, query, k, tags)
+        if not memories:
+            return "Nothing remembered matches."
+        lines = [f"{len(memories)} remembered facts for {query!r}, most relevant first:"]
+        for memory in memories:
+            age = describe_age(store._clock() - memory.created)
+            labels = f"; tags: {', '.join(memory.tags)}" if memory.tags else ""
+            lines.append(f"[{memory.id}] ({age}{labels}) {memory.text}")
+        return "\n".join(lines)
+
+    def forget(memory_id):
+        run(store.forget, memory_id)
+        return f"Forgot {memory_id}. It will no longer be recalled."
+
+    instructions = (
+        f"This server is the long-term memory of {owner}, kept between conversations. Before "
+        "answering anything that may depend on earlier conversations (preferences, past "
+        "decisions, facts about them or their work), call recall. When you learn something "
+        "worth keeping, call remember with one short sentence per fact; do not store passing "
+        "chatter. When a fact changes, remember the new one and pass the old one's id in "
+        "replaces.")
+    tools = [
+        Tool("recall", "Look up remembered facts relevant to a question. Each comes with "
+                       "its id, its age, and its tags.", RECALL, recall),
+        Tool("remember", "Store one fact to recall in later conversations. An almost "
+                         "identical fact is not stored twice.", REMEMBER, remember, True),
+        Tool("forget", "Stop recalling a fact, for example one the user asked you to "
+                       "forget.", FORGET, forget, True),
+    ]
+    return McpServer("vsearch-memory", "0.1.0", tools, instructions=instructions,
+                     on_close=store.close)
 
 
 def build_server(home, read_only=False, embedder=None):

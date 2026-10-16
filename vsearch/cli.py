@@ -10,6 +10,8 @@ Command-line interface for running and querying a local cluster.
     vsearch ingest notes/ --namespace alice       keep one user's documents apart, on one shard
     vsearch search "..." --namespace alice        search only that user's documents
     vsearch mcp                                   serve search/ingest/status to an MCP client
+    vsearch memory remember "prefers short answers" --owner rahul     an agent's long-term memory
+    vsearch memory recall "how should I answer?" --owner rahul
     vsearch ops check                             find what is wrong with the cluster and fix it
     vsearch ops check --brain openai              the same, with a model deciding what to do
     vsearch ops watch --interval 30               keep checking, and fix problems as they appear
@@ -35,11 +37,12 @@ import grpc
 
 from .client import ReplicasOutOfSyncError, ShardUnavailableError, free_ports
 from .dataset import load_glove
-from .documents import DEFAULT_EMBEDDER, describe, find_passages, ingest_files
+from .documents import DEFAULT_EMBEDDER, describe, find_passages, holds, ingest_files
 from .embedding import EMBEDDERS, EmbedderUnavailable
 from .agent import (CLAUDE_MODEL, OPENAI_MODEL, ClaudeModel, ModelError, ModelUnavailable,
                     OpenAIModel, run_agent)
-from .mcp_server import build_server
+from .mcp_server import build_memory_server, build_server
+from .memory import MemoryStore, describe_age
 from .ops import PROMPTS, Journal, Operations, claimed_outcome, run_runbook, task_for
 from .processes import is_running, pick, spawn, stop, wait_for
 from .state import (UserError, address, connect, load_env_file, read_state, server_status,
@@ -155,7 +158,7 @@ def similar(args):
     if not dataset:
         raise UserError("nothing is loaded yet; run: vsearch load glove")
     if dataset["name"] != "glove":
-        raise UserError("this cluster holds documents, not words; use: vsearch search \"...\"")
+        raise UserError(holds(dataset))
     words, vectors = load_glove(dataset["dir"])
     word = args.word.lower()                   # the GloVe 6B vocabulary is lowercase
     try:
@@ -251,7 +254,43 @@ def search(args):
 
 def mcp(args):
     read_state(args.home)                      # fail now, not on the first tool call
-    build_server(args.home, read_only=args.read_only, embedder=args.embedder).serve()
+    if args.memory:
+        build_memory_server(args.home, args.owner, embedder=args.embedder).serve()
+    else:
+        build_server(args.home, read_only=args.read_only, embedder=args.embedder).serve()
+    return 0
+
+
+def _with_memory(args, use):
+    store = MemoryStore(args.home, args.owner, embedder=getattr(args, "embedder", None))
+    try:
+        return use(store)
+    finally:
+        store.close()
+
+
+def memory_remember(args):
+    memory_id, stored = _with_memory(
+        args, lambda store: store.remember(args.text, args.tag or (), args.replaces or ()))
+    print(f"remembered as {memory_id}" if stored else f"already remembered as {memory_id}")
+    return 0
+
+
+def memory_recall(args):
+    memories = _with_memory(args, lambda store: store.recall(args.query, args.k, args.tag))
+    if not memories:
+        print("nothing remembered matches")
+    now = time.time()
+    for memory in memories:
+        tags = f"[{', '.join(memory.tags)}] " if memory.tags else ""
+        print(f"  {memory.id}  {memory.similarity:.3f}  {describe_age(now - memory.created):<15} "
+              f"{tags}{memory.text}")
+    return 0
+
+
+def memory_forget(args):
+    _with_memory(args, lambda store: store.forget(args.memory_id))
+    print(f"forgot {args.memory_id}: it is no longer recalled (its text stays on disk)")
     return 0
 
 
@@ -457,12 +496,36 @@ def build_parser():
 
     server = commands.add_parser(
         "mcp", help="serve this cluster to an MCP client over stdin/stdout")
+    server.add_argument("--memory", action="store_true",
+                        help="serve remember/recall/forget for one owner instead of documents")
+    server.add_argument("--owner", default="default", help="whose memory, with --memory")
     server.add_argument("--read-only", action="store_true",
                         help="offer search and status only, not ingest")
     server.add_argument("--embedder", choices=sorted(EMBEDDERS),
                         help=f"embedder for a collection created through the ingest tool "
                              f"(default: {DEFAULT_EMBEDDER})")
     server.set_defaults(run=mcp)
+
+    memory = commands.add_parser("memory", help="an agent's long-term memory, in its own cluster")
+    memory_actions = memory.add_subparsers(dest="action", required=True)
+    remember = memory_actions.add_parser("remember", help="store a fact")
+    remember.add_argument("text")
+    remember.add_argument("--tag", action="append", help="a label to recall by; repeatable")
+    remember.add_argument("--replaces", action="append", metavar="ID",
+                          help="id of a fact this one makes out of date; repeatable")
+    remember.add_argument("--embedder", choices=sorted(EMBEDDERS),
+                          help=f"for the first memory in a cluster (default: {DEFAULT_EMBEDDER})")
+    remember.set_defaults(run=memory_remember)
+    recall = memory_actions.add_parser("recall", help="the facts most relevant to a query")
+    recall.add_argument("query")
+    recall.add_argument("-k", type=int, default=5)
+    recall.add_argument("--tag", action="append", help="only facts with one of these labels")
+    recall.set_defaults(run=memory_recall)
+    forget = memory_actions.add_parser("forget", help="stop recalling a fact")
+    forget.add_argument("memory_id")
+    forget.set_defaults(run=memory_forget)
+    for action in (remember, recall, forget):
+        action.add_argument("--owner", default="default", help="whose memory")
     return parser
 
 

@@ -89,6 +89,11 @@ def test_ingest_then_search_through_the_tools(server, tmp_path):
     text, is_error = call(server, "search", question="log", source="docs/missing.md")
     assert not is_error and text.startswith("No passages matched")
 
+    # Closing drops the connections; a later call opens new ones.
+    server.close()
+    text, is_error = call(server, "search", question="what happens to the log after a crash?")
+    assert not is_error and "Write-ahead log" in text
+
 
 def test_namespaces_and_status(server, cluster, tmp_path, capsys):
     call(server, "ingest", paths=[str(tmp_path / "docs")])

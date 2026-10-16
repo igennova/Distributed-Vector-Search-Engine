@@ -41,10 +41,24 @@ def display_path(path):
         return str(path)
 
 
+# What each kind of cluster holds, and the command that searches it.
+KINDS = {"glove": ("GloVe words", "vsearch similar WORD"),
+         "documents": ("documents", 'vsearch search "..."'),
+         "memory": ("agent memories", 'vsearch memory recall "..."')}
+
+
+def holds(dataset):
+    """A sentence saying what a cluster holds and how to search it."""
+    what, command = KINDS[dataset["name"]]
+    return f"this cluster holds {what}; use: {command}"
+
+
 def describe(dataset):
     """One line saying what a cluster holds."""
     if not dataset:
         return "nothing is loaded yet"
+    if dataset["name"] == "memory":
+        return f"holds agent memories, embedder: {dataset['embedder']}"
     if dataset["name"] != "documents":
         return f"loaded: the {dataset['limit']:,} most frequent {dataset['name']} words"
     spaces = namespaces(dataset)
@@ -72,8 +86,8 @@ def ingest_files(home, state, coordinator, replies, paths, embedder_name=None, n
         dataset = {"name": "documents", "embedder": embedder.name, "dim": embedder.dim,
                    "passages": 0, "sources": {}}
     elif dataset["name"] != "documents":
-        raise UserError("this cluster holds GloVe words, and vectors from two embedders cannot "
-                        "share an index; start another cluster with --home")
+        raise UserError(f"{holds(dataset)}. Vectors from two embedders cannot share an "
+                        "index; start another cluster with --home")
     elif embedder_name not in (None, dataset["embedder"]):
         raise UserError(f"this cluster was built with the {dataset['embedder']!r} embedder; "
                         "every passage in it has to use the same one")
@@ -131,7 +145,7 @@ def find_passages(state, coordinator, question, k=5, where=None, namespace=None,
     if not dataset:
         raise UserError("nothing is ingested yet; run: vsearch ingest PATH")
     if dataset["name"] != "documents":
-        raise UserError("this cluster holds GloVe words; use: vsearch similar WORD")
+        raise UserError(holds(dataset))
 
     embedder = embedders(dataset["embedder"])
     started = time.perf_counter()
