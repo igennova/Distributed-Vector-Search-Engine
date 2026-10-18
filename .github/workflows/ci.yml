@@ -28,3 +28,20 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install the vsearch command
+        run: pip install -r requirements.txt && pip install -e .
+
+      - name: Build and run the cluster in Docker, then use it
+        run: ./scripts/docker_smoke.sh
