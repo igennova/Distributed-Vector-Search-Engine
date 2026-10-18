@@ -730,3 +730,56 @@
   dropping replaced facts, dropping forgotten ones, not storing a repeat, the recency bonus,
   separate owners, refusing to replace an unknown id, reconnecting after close, and keeping
   memories out of a documents cluster.
+
+## Docker
+- Running the cluster needed Python 3.13, a virtual environment, and servers started by
+  hand. Now each shard server is an image, and `docker-compose.yml` runs 2 shards x 2
+  replicas, one container and one named volume per server. Replicas of a shard get the same
+  `--seed`, so the same writes still build the same index.
+- The image holds only the server: numpy, grpcio, protobuf, and the package. Embedding
+  happens in whatever writes to the cluster (the `vsearch` command on the host), so the
+  model and ONNX Runtime stay out of it. About 325 MB on disk, 73 MB to download.
+- Dependencies are installed in their own layer, from `pyproject.toml` with an empty package
+  in place, so changing the code rebuilds in seconds instead of reinstalling numpy and gRPC.
+  `.dockerignore` lets in only `pyproject.toml` and `vsearch/`; a `.env` with API keys can
+  never end up in the image.
+- The server runs as an ordinary user, not root. It listens on 0.0.0.0 inside its container
+  so its neighbours and the published port can reach it, and the compose file publishes the
+  ports on 127.0.0.1 only, since the service has no authentication.
+- `init: true` puts a small init process in front of the server. Python running as PID 1
+  ignores SIGTERM unless it installs a handler, so `docker stop` would wait 10 s and then kill
+  it; with an init process the signal stops it at once. (Killing it was never unsafe: every
+  acknowledged write is already in the fsynced log.)
+- `restart: unless-stopped`: when the server process inside a container was killed, Docker
+  started the container again within a second, and the server recovered its 60 vectors from
+  its volume (restart count 1, nothing lost). A container stopped on purpose stays stopped.
+- First build failed: all four services had `build: .` and the same image name, and Compose
+  built them in parallel, racing to name the image. Now one service builds it and the others
+  reuse it with `pull_policy: never`, which also stops Docker from ever pulling an image
+  called `vsearch-server` from a public registry.
+- `vsearch cluster attach` records servers that something else runs. Everything that reads
+  and writes works as before (status, ingest, search, memory, MCP, ops), while starting,
+  stopping, and restarting are refused, since they belong to Docker. The ops agent's restart
+  tool says the same to the model, and its log tool says the logs are kept by Docker.
+- Found by running it: `repair` failed in Docker. The coordinator tells the lagging replica
+  to copy from its twin and passes the twin's address, which was `127.0.0.1:50054`: right from
+  the host, but inside a container 127.0.0.1 is the container itself. Each server now has two
+  addresses: the one clients use, and the one its peers use (`shard-1-replica-1:50051` on the
+  compose network). Kafka has the same split between listeners and advertised listeners. A
+  test attaches a server with a wrong peer address and checks that repair fails, which shows
+  that the peer address is the one handed over.
+- With Docker the work divides. Docker restarts a server that dies; it does not know that
+  the restarted replica missed writes while it was down. Run against the containers, the ops
+  agent found "replicas of shard 1 are out of sync (seq 3 vs 4)", repaired it over the
+  compose network, and the check came back healthy. Kubernetes has the same gap, which is
+  why databases on Kubernetes ship an operator.
+- `scripts/docker_smoke.sh` builds and starts the cluster, attaches, ingests, searches, has
+  Docker restart a server, checks with `ops check`, and searches again; CI runs it on every
+  push. It uses a Compose project of its own, so it never touches a cluster started with plain
+  `docker compose up`, and it removes its containers and volumes when it ends.
+- Not done: `cluster detach` forgets what was ingested along with the addresses, so attaching
+  the same servers again starts without that record (ingest then refuses, because the servers
+  are not empty). The agent cannot read container logs.
+- Each check was verified by removing it in a copy of the code and confirming a test fails:
+  repair handing over the peer address, refusing to stop or restart attached servers, the
+  agent's refusal to restart them, and attach checking that every server answers.

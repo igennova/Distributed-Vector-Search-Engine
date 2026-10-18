@@ -72,6 +72,28 @@ $ vsearch cluster down                            # data stays on disk; `cluster
 The cluster's state, data, and logs live in `data/cluster` (change it with `--home`).
 `vsearch cluster down --wipe` deletes them.
 
+### Run the cluster in Docker
+
+`docker-compose.yml` runs the same 2-shard, 2-replica cluster as containers, one per server,
+each with its own volume. The `vsearch` command on this machine then attaches to them:
+
+```console
+$ docker compose up --detach --build --wait
+$ vsearch --home data/docker cluster attach \
+    127.0.0.1:50051=shard-0-replica-0:50051,127.0.0.1:50052=shard-0-replica-1:50051 \
+    127.0.0.1:50053=shard-1-replica-0:50051,127.0.0.1:50054=shard-1-replica-1:50051
+attached 4 servers in 2 shards, run by docker
+$ vsearch --home data/docker ingest README.md DECISIONS.md
+$ vsearch --home data/docker search "how does a replica catch up?"
+```
+
+Each server is given two addresses: the port published on this machine, and the name its
+twin uses inside Docker's network to copy from it during a repair. Docker now starts,
+stops, and restarts the servers (a server process that crashes is started again from its
+volume), so `vsearch cluster up/down/kill/restart` refuse on an attached cluster. Docker does
+not know that a restarted replica may have missed writes; `vsearch ops check` finds that and
+runs the repair. `scripts/docker_smoke.sh` runs this whole path in CI.
+
 ### Search your own documents
 
 `vsearch ingest` splits documents into passages, embeds each one, and stores the vector with the
@@ -284,7 +306,8 @@ vsearch/            the engine
   cli.py              the `vsearch` command
 evals/              ops_eval.py (fault scenarios, grading, results), retrieval_eval.py
   protos/shard.proto  the gRPC contract (Add, Search, Status, and the resync calls)
-scripts/            gen_protos.sh regenerates the gRPC code from the .proto
+scripts/            gen_protos.sh regenerates the gRPC code; docker_smoke.sh tests the Docker setup
+Dockerfile          one shard server; docker-compose.yml runs 2 shards x 2 replicas
 tests/              pytest suite
 benchmarks/         recall / latency / QPS benchmarks
 DECISIONS.md        design decisions and trade-offs
@@ -699,7 +722,8 @@ python -m evals.retrieval_eval
 - [x] Operations agent: a model that diagnoses and repairs the cluster with tools
 - [x] Agent memory: remember, recall by meaning, replace and forget
 - [x] Evaluations: agent reliability over 140 runs, and retrieval on 40 labelled questions
-- [ ] Docker / Kubernetes deployment
+- [x] Docker: the cluster as containers, attached to and repaired from the host
+- [ ] Kubernetes (kind): StatefulSets, volumes, and an operator-style repair loop
 
 ## Design notes
 
