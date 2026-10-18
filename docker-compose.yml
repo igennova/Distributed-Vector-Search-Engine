@@ -1,0 +1,46 @@
+# A 2-shard, 2-replica cluster: one container per shard server, each with its own volume.
+# Replicas of a shard get the same --seed, so the same writes build the same index.
+# Ports are published on 127.0.0.1 only: the servers have no authentication.
+#
+#   docker compose up -d --build
+#   vsearch --home data/docker cluster attach \
+#     127.0.0.1:50051=shard-0-replica-0:50051,127.0.0.1:50052=shard-0-replica-1:50051 \
+#     127.0.0.1:50053=shard-1-replica-0:50051,127.0.0.1:50054=shard-1-replica-1:50051
+#
+# Each server has two addresses: the one published on this machine (127.0.0.1:5005x), and
+# the one its twin uses inside the compose network to copy from it during a repair.
+
+x-server: &server
+  image: vsearch-server
+  pull_policy: never            # built here (below), never fetched from a registry
+  init: true                    # forwards stop signals to the server
+  restart: unless-stopped       # a server that crashes is started again
+
+services:
+  shard-0-replica-0:
+    <<: *server
+    build: .                    # one service builds the image; the others reuse it
+    command: ["--seed", "0", "--ef-search", "100"]
+    ports: ["127.0.0.1:50051:50051"]
+    volumes: ["shard-0-replica-0:/data"]
+  shard-0-replica-1:
+    <<: *server
+    command: ["--seed", "0", "--ef-search", "100"]
+    ports: ["127.0.0.1:50052:50051"]
+    volumes: ["shard-0-replica-1:/data"]
+  shard-1-replica-0:
+    <<: *server
+    command: ["--seed", "1", "--ef-search", "100"]
+    ports: ["127.0.0.1:50053:50051"]
+    volumes: ["shard-1-replica-0:/data"]
+  shard-1-replica-1:
+    <<: *server
+    command: ["--seed", "1", "--ef-search", "100"]
+    ports: ["127.0.0.1:50054:50051"]
+    volumes: ["shard-1-replica-1:/data"]
+
+volumes:
+  shard-0-replica-0:
+  shard-0-replica-1:
+  shard-1-replica-0:
+  shard-1-replica-1:

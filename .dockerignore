@@ -1,0 +1,5 @@
+# Only pyproject.toml and vsearch/ go into the image.
+*
+!pyproject.toml
+!vsearch/
+**/__pycache__
