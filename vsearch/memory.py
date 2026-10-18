@@ -27,7 +27,7 @@ import numpy as np
 from .client import ReplicasOutOfSyncError, ShardUnavailableError
 from .documents import DEFAULT_EMBEDDER
 from .embedding import get_embedder
-from .state import UserError, connect, read_state, writable, write_state
+from .state import UserError, connect, read_state, shard_addresses, writable, write_state
 
 DUPLICATE_SIMILARITY = 0.97   # a new fact this close to a stored one is the same fact
 RECENCY_WEIGHT = 0.03         # the most a fact's age can add to its score
@@ -221,7 +221,7 @@ class MemoryStore:
         return self._embedder_cache[name]
 
     def _connect(self, state):
-        addresses = [[server["port"] for server in group] for group in state["servers"]]
+        addresses = shard_addresses(state)
         if addresses != self._addresses:
             self.close()
             self._coordinator, self._addresses = connect(state), addresses

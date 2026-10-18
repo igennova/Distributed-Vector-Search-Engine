@@ -1,7 +1,11 @@
 """
-A local cluster's state: cluster.json in the cluster's home directory records the servers'
-ports and process ids and what has been loaded into them. The command line and the MCP
-server both start from it.
+A cluster's state: cluster.json in the cluster's home directory records the servers'
+addresses, the process ids of servers vsearch started itself, and what has been loaded into
+them. The command line and the MCP server both start from it.
+
+A cluster is either started by vsearch (`cluster up`: local processes it can stop and
+restart) or attached (`cluster attach`: servers run by something else, such as Docker, which
+also starts and restarts them).
 """
 import json
 import os
@@ -53,7 +57,19 @@ def write_state(home, state):
 
 
 def address(server):
-    return f"127.0.0.1:{server['port']}"
+    return f"{server.get('host', '127.0.0.1')}:{server['port']}"
+
+
+def managed_by(state):
+    """What runs the servers, if not vsearch itself (e.g. "docker"); None for local ones."""
+    return state.get("managed_by")
+
+
+def refuse_if_managed(state, action):
+    """Starting, stopping, and restarting attached servers belongs to what runs them."""
+    if managed_by(state):
+        raise UserError(f"this cluster's servers are run by {managed_by(state)}, so vsearch "
+                        f"cannot {action} them; do it there (e.g. docker compose)")
 
 
 def servers(state):
@@ -66,9 +82,17 @@ def shard_addresses(state):
     return [[address(server) for server in group] for group in state["servers"]]
 
 
+def peer_address(server):
+    """How the other servers reach this one; the same as its address unless the servers have
+    a network of their own (Docker), where they know each other by other names."""
+    return server.get("peer") or address(server)
+
+
 def connect(state):
     """A coordinator for the cluster's servers."""
-    return GrpcCoordinator(shard_addresses(state))
+    return GrpcCoordinator(shard_addresses(state),
+                           peers=[[peer_address(server) for server in group]
+                                  for group in state["servers"]])
 
 
 def server_status(server):

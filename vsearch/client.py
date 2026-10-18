@@ -63,8 +63,12 @@ _UNCHECKED = -1   # in-memory shards don't number their writes, so their order i
 
 
 class _Replica:
-    def __init__(self, address):
+    def __init__(self, address, peer=None):
         self.address = address
+        # How the other replicas reach this one. It differs from `address` when the servers
+        # sit on their own network, as in Docker: 127.0.0.1:50052 from the host is
+        # shard-0-replica-1:50051 from a neighbouring container.
+        self.peer = peer or address
         self.channel = grpc.insecure_channel(address)
         self.stub = shard_pb2_grpc.ShardServiceStub(self.channel)
         self.down_until = 0.0     # time.monotonic() until which this replica is tried last
@@ -76,9 +80,11 @@ class GrpcCoordinator:
     `shards` has one entry per shard: a single address, or a list of replica addresses.
     """
 
-    def __init__(self, shards, timeout=5.0, add_timeout=600.0, retry_after=5.0):
-        self.replicas = [[_Replica(address) for address in ([s] if isinstance(s, str) else s)]
-                         for s in shards]
+    def __init__(self, shards, timeout=5.0, add_timeout=600.0, retry_after=5.0, peers=None):
+        groups = [[s] if isinstance(s, str) else list(s) for s in shards]
+        peers = peers or [[None] * len(group) for group in groups]
+        self.replicas = [[_Replica(address, peer) for address, peer in zip(group, peer_group)]
+                         for group, peer_group in zip(groups, peers)]
         self.timeout = timeout            # per-search deadline: a stuck server can't hang a query
         self.add_timeout = add_timeout    # inserts build graph, so they get a longer deadline
         self.retry_after = retry_after    # seconds a failed replica is deprioritized
@@ -201,7 +207,7 @@ class GrpcCoordinator:
             for replica, status in statuses:
                 if status.last_seq < newest.last_seq:
                     result = replica.stub.SyncFrom(
-                        shard_pb2.SyncFromRequest(peer=source.address), timeout=self.add_timeout)
+                        shard_pb2.SyncFromRequest(peer=source.peer), timeout=self.add_timeout)
                     synced.append(ReplicaSync(shard, replica.address, source.address,
                                               result.method, result.records_applied,
                                               result.last_seq))

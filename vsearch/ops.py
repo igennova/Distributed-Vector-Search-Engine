@@ -21,7 +21,7 @@ import numpy as np
 from .health import cluster_health, describe_health, find_problems
 from .mcp import Tool, ToolError
 from .processes import log_path, pick, spawn, wait_for
-from .state import UserError, connect, read_state, write_state
+from .state import UserError, connect, managed_by, read_state, write_state
 
 MAX_LOG_LINES = 100
 SERVER = {
@@ -148,7 +148,12 @@ class Operations:
         return f"{describe_health(health)}\n{verdict}"
 
     def read_server_log(self, shard, replica, lines=40):
-        self._pick(shard, replica)
+        state = read_state(self.home)
+        self._pick(shard, replica, state)
+        if managed_by(state):
+            raise ToolError(f"the logs of shard {shard} replica {replica} are kept by "
+                            f"{managed_by(state)}, not here (e.g. docker compose logs); "
+                            "report that a person should read them.")
         path = log_path(self.home, shard, replica)
         if not path.exists():
             return f"shard {shard} replica {replica} has no log file yet."
@@ -181,6 +186,10 @@ class Operations:
         current = next(s for s in cluster_health(state) if (s.shard, s.replica) == (shard, replica))
         if current.up:
             raise ToolError(f"{name} is already up; there is nothing to restart.")
+        if managed_by(state):
+            raise ToolError(f"{name} is run by {managed_by(state)}, which restarts servers "
+                            "itself; this agent cannot. Check its status again shortly, or "
+                            "report that it is not coming back.")
         if current.process:
             raise ToolError(f"{name} does not answer but its process is still running. This "
                             "agent cannot stop processes: report it for a person to look at.")
@@ -287,7 +296,8 @@ def run_runbook(ops):
                 tools["restart_server"](shard=server.shard, replica=server.replica)
                 notes.append(f"restarted shard {server.shard} replica {server.replica}")
             except ToolError as err:
-                notes.append(f"could not restart shard {server.shard} replica {server.replica}: {err}")
+                notes.append(f"could not restart shard {server.shard} replica {server.replica}: "
+                             f"{str(err).rstrip('.')}")
     try:
         result = tools["repair"]()
         if not result.startswith("Nothing to repair"):

@@ -35,7 +35,7 @@ from pathlib import Path
 
 import grpc
 
-from .client import ReplicasOutOfSyncError, ShardUnavailableError, free_ports
+from .client import ReplicasOutOfSyncError, ShardUnavailableError, free_ports, wait_until_ready
 from .dataset import load_glove
 from .documents import DEFAULT_EMBEDDER, describe, find_passages, holds, ingest_files
 from .embedding import EMBEDDERS, EmbedderUnavailable
@@ -45,8 +45,8 @@ from .mcp_server import build_memory_server, build_server
 from .memory import MemoryStore, describe_age
 from .ops import PROMPTS, Journal, Operations, claimed_outcome, run_runbook, task_for
 from .processes import is_running, pick, spawn, stop, wait_for
-from .state import (UserError, address, connect, load_env_file, read_state, server_status,
-                    servers, writable, write_state)
+from .state import (UserError, address, connect, load_env_file, read_state, refuse_if_managed,
+                    server_status, servers, writable, write_state)
 
 LOAD_BATCH = 10_000
 SNIPPET_CHARS = 240
@@ -58,6 +58,7 @@ def cluster_up(args):
     home = args.home
     if (home / "cluster.json").exists():
         state = read_state(home)
+        refuse_if_managed(state, "start")
         if any(is_running(server) for _, _, server in servers(state)):
             raise UserError("this cluster is already running; see: vsearch status")
         print(f"starting the existing cluster in {home} again (servers recover from disk)")
@@ -79,8 +80,53 @@ def cluster_up(args):
     return status(args)
 
 
+def cluster_attach(args):
+    """Record servers that something else runs (Docker, another machine) as this cluster."""
+    home = args.home
+    if (home / "cluster.json").exists():
+        raise UserError(f"{home} already has a cluster; use another --home, or "
+                        "`vsearch cluster detach` first")
+    groups = []
+    for shard in args.shards:
+        group = []
+        for replica in shard.split(","):
+            reach, _, peer = replica.strip().partition("=")
+            host, colon, port = reach.rpartition(":")
+            if not colon or not host or not port.isdigit() or (peer and ":" not in peer):
+                raise UserError(f"expected HOST:PORT or HOST:PORT=PEER_HOST:PEER_PORT, "
+                                f"got {replica!r}")
+            server = {"host": host, "port": int(port), "pid": None}
+            if peer:
+                server["peer"] = peer
+            group.append(server)
+        groups.append(group)
+    state = {"seed": None, "server_args": {}, "servers": groups, "dataset": None,
+             "managed_by": args.managed_by}
+    for shard, replica, server in servers(state):
+        try:
+            wait_until_ready(address(server), timeout=args.timeout)
+        except grpc.FutureTimeoutError:
+            raise UserError(f"shard {shard} replica {replica} does not answer at "
+                            f"{address(server)}") from None
+    home.mkdir(parents=True, exist_ok=True)
+    write_state(home, state)
+    print(f"attached {sum(map(len, groups))} servers in {len(groups)} shards, run by "
+          f"{args.managed_by}")
+    return status(args)
+
+
+def cluster_detach(args):
+    state = read_state(args.home)
+    if not state.get("managed_by"):
+        raise UserError("this cluster was started by vsearch; stop it with: vsearch cluster down")
+    (args.home / "cluster.json").unlink()
+    print(f"forgot the attached cluster in {args.home}; its servers and their data are untouched")
+    return 0
+
+
 def cluster_down(args):
     state = read_state(args.home)
+    refuse_if_managed(state, "stop")
     stopped = stop([server for _, _, server in servers(state)], signal.SIGTERM)
     print(f"stopped {stopped} server(s)")
     if args.wipe:
@@ -93,6 +139,7 @@ def cluster_down(args):
 
 def cluster_kill(args):
     state = read_state(args.home)
+    refuse_if_managed(state, "kill")
     server = pick(state, args.shard, args.replica)
     if not stop([server], signal.SIGKILL):
         raise UserError(f"shard {args.shard} replica {args.replica} is not running")
@@ -102,6 +149,7 @@ def cluster_kill(args):
 
 def cluster_restart(args):
     state = read_state(args.home)
+    refuse_if_managed(state, "restart")
     server = pick(state, args.shard, args.replica)
     if is_running(server):
         raise UserError(f"shard {args.shard} replica {args.replica} is already running")
@@ -424,6 +472,20 @@ def build_parser():
     down = actions.add_parser("down", help="stop the servers; their data stays on disk")
     down.add_argument("--wipe", action="store_true", help="also delete all of the cluster's data")
     down.set_defaults(run=cluster_down)
+
+    attach = actions.add_parser(
+        "attach", help="use servers that something else runs, such as Docker")
+    attach.add_argument("shards", nargs="+", metavar="HOST:PORT[=PEER][,...]",
+                        help="one argument per shard: its replicas' addresses, comma-separated. "
+                             "Add =PEER_HOST:PEER_PORT when the servers reach each other by "
+                             "another address than you reach them (Docker)")
+    attach.add_argument("--managed-by", default="docker",
+                        help="what runs the servers, shown in messages (default: docker)")
+    attach.add_argument("--timeout", type=float, default=20,
+                        help="seconds to wait for every server to answer")
+    attach.set_defaults(run=cluster_attach)
+    actions.add_parser("detach", help="forget an attached cluster (its servers keep running)") \
+        .set_defaults(run=cluster_detach)
 
     for name, run, text in [("kill", cluster_kill, "crash one server with SIGKILL"),
                             ("restart", cluster_restart, "start a stopped server again")]:
