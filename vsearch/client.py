@@ -136,15 +136,21 @@ class GrpcCoordinator:
                 for replica in self.replicas[shard]:
                     calls.append((shard, replica.stub.Add.future(request, timeout=self.add_timeout)))
 
-            reported = {}
-            try:
-                for shard, call in calls:
+            reported, failure = {}, None
+            for shard, call in calls:
+                # Wait for every call, even after one has failed. Raising at the first failure
+                # would let the caller close the channels while the other replicas' writes are
+                # still in flight, cancelling them: one dead server would then also leave
+                # healthy shards with replicas that disagree.
+                try:
                     reported.setdefault(shard, set()).add(call.result().size)
-            except grpc.RpcError:
+                except grpc.RpcError as err:
+                    failure = failure or err
+            if failure is not None:
                 # Some replicas may have applied this chunk and others not. Forget what we
                 # knew, so the next write re-checks every shard before sending anything.
                 self._last_seqs = [None] * len(self.replicas)
-                raise
+                raise failure
             for shard, sizes in reported.items():
                 if len(sizes) > 1:
                     raise RuntimeError(f"replicas of shard {shard} diverged: sizes {sorted(sizes)}")

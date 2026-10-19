@@ -101,3 +101,41 @@ def test_failover_after_a_server_process_crashes():
         cluster.kill(shard=0, replica=0)          # SIGKILL: no clean shutdown
         for q in queries:
             assert coord.search(q, 5) == local.search(q, 5)
+
+
+class _Down(grpc.RpcError):
+    def code(self):
+        return grpc.StatusCode.UNAVAILABLE
+
+
+class _Call:
+    """A stand-in for an Add sent to one replica: fails at once, or answers when waited on."""
+    def __init__(self, waited, name, fails):
+        self.waited, self.name, self.fails = waited, name, fails
+
+    def result(self):
+        if self.fails:
+            raise _Down()
+        self.waited.append(self.name)
+        return type("Reply", (), {"size": 3})()
+
+
+def test_a_failed_write_waits_for_the_other_replicas_before_raising():
+    # One replica fails at once while the others are still applying the write. Raising at
+    # that moment would let the caller close the channels and cancel the writes still in
+    # flight, so one dead server would also leave healthy shards with replicas that disagree.
+    # (CI caught this: on a slower machine a healthy shard's second replica missed the write.)
+    waited = []
+    coordinator = GrpcCoordinator([["127.0.0.1:1", "127.0.0.1:2"], ["127.0.0.1:3", "127.0.0.1:4"]])
+    for shard, group in enumerate(coordinator.replicas):
+        for replica, target in enumerate(group):
+            name, fails = f"{shard}/{replica}", (shard, replica) == (0, 0)
+            target.stub = type("Stub", (), {})()
+            target.stub.Add = type("Add", (), {"future": staticmethod(
+                lambda request, timeout, name=name, fails=fails: _Call(waited, name, fails))})()
+    coordinator._last_seqs = [4, 4]
+    with pytest.raises(grpc.RpcError):
+        coordinator.add(np.ones((4, 8), dtype=np.float32))
+    assert waited == ["0/1", "1/0", "1/1"]       # every live replica was waited for
+    assert coordinator._last_seqs == [None, None]
+    coordinator.close()

@@ -777,6 +777,15 @@
   Docker restart a server, checks with `ops check`, and searches again; CI runs it on every
   push. It uses a Compose project of its own, so it never touches a cluster started with plain
   `docker compose up`, and it removes its containers and volumes when it ends.
+- Found by CI after this step: a write that failed on one replica could also leave a healthy
+  shard's replicas disagreeing. The coordinator sends a chunk to every replica and then
+  waits on the replies; at the first error it raised at once. The caller then closed the
+  coordinator, which cancels any request still in flight, and on GitHub's slower machine a
+  healthy shard's second replica was still opening its connection, so its copy of the write
+  was never sent. The coordinator now waits for every reply before raising. A test with
+  stand-in replicas, one failing at once, checks that every other replica is waited for; it
+  fails on the old code. Locally the race never showed, because the other writes finished
+  first.
 - Not done: `cluster detach` forgets what was ingested along with the addresses, so attaching
   the same servers again starts without that record (ingest then refuses, because the servers
   are not empty). The agent cannot read container logs.
