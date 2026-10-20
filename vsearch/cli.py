@@ -39,6 +39,7 @@ from .client import ReplicasOutOfSyncError, ShardUnavailableError, free_ports, w
 from .dataset import load_glove
 from .documents import DEFAULT_EMBEDDER, describe, find_passages, holds, ingest_files
 from .embedding import EMBEDDERS, EmbedderUnavailable
+from . import __version__
 from .agent import (CLAUDE_MODEL, OPENAI_MODEL, ClaudeModel, ModelError, ModelUnavailable,
                     OpenAIModel, run_agent)
 from .mcp_server import build_memory_server, build_server
@@ -452,6 +453,7 @@ def repair(args):
 
 def build_parser():
     parser = argparse.ArgumentParser(prog="vsearch", description="Run and query a local cluster.")
+    parser.add_argument("--version", action="version", version=f"vsearch {__version__}")
     parser.add_argument("--home", type=Path, default=Path("data/cluster"),
                         help="directory holding the cluster's state, data, and logs")
     commands = parser.add_subparsers(dest="command", required=True)

@@ -221,3 +221,14 @@ def test_namespaces_and_filters_on_the_command_line(tmp_path, capsys, monkeypatc
         assert "6 passages from 6 file(s) in 2 namespace(s)" in capsys.readouterr().out
     finally:
         run(home, "cluster", "down", "--wipe")
+
+
+def test_version_matches_the_package(capsys):
+    import tomllib
+    from pathlib import Path
+
+    with pytest.raises(SystemExit) as done:
+        main(["--version"])
+    assert done.value.code == 0
+    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    assert capsys.readouterr().out.strip() == f"vsearch {pyproject['project']['version']}"
