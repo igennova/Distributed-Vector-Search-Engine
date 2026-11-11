@@ -724,6 +724,12 @@ python -m evals.retrieval_eval
 - [x] Evaluations: agent reliability over 140 runs, and retrieval on 40 labelled questions
 - [x] Docker: the cluster as containers, attached to and repaired from the host
 - [ ] Kubernetes (kind): StatefulSets, volumes, and an operator-style repair loop
+  - [ ] Server stops cleanly on SIGTERM (Python as PID 1 has no default handler)
+  - [ ] Manifests in `k8s/`: one StatefulSet per shard, a volume per replica, probes
+  - [ ] Reach each pod from the host: per-pod NodePort Services and kind port mappings
+  - [ ] Repair loop in the cluster: a Deployment running `vsearch ops watch` on peer addresses
+  - [ ] `scripts/k8s_smoke.sh` in CI: delete a pod, then its volume, and check nothing is lost
+  - [ ] README section and design notes from running it
 
 ## Design notes
 

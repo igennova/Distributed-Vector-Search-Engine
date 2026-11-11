@@ -792,3 +792,49 @@
 - Each check was verified by removing it in a copy of the code and confirming a test fails:
   repair handing over the peer address, refusing to stop or restart attached servers, the
   agent's refusal to restart them, and attach checking that every server answers.
+
+## Kubernetes (planned)
+Written before building it; the notes from running it will replace this section.
+- Goal: the same 2-shard, 2-replica cluster on a local kind cluster, with Kubernetes
+  restarting servers and rescheduling pods, and a loop inside the cluster doing what Docker
+  left to a person: noticing that a replica is behind its twin (a replaced replica with an
+  empty volume, or one a failed write reached only partly), and repairing it. Kubernetes has
+  the same gap as Docker (see above).
+- One StatefulSet per shard (`shard-0`, `shard-1`), 2 replicas each. A shard's replicas need
+  the same `--seed`, and shards need different ones; one StatefulSet per shard gives each its
+  own arguments without the server learning to read its ordinal. The pod ordinal is the
+  replica number (`shard-1-0`, `shard-1-1`). `podManagementPolicy: Parallel`, since replicas
+  do not depend on each other to start.
+- A `volumeClaimTemplate` per StatefulSet: each replica keeps its own snapshot and log across
+  restarts and rescheduling. Deleting a replica's claim and pod gives it an empty volume,
+  which is the "lost its disk" case that resync already handles by copying a snapshot.
+- A headless Service per shard gives each pod a stable name
+  (`shard-1-0.shard-1.vsearch.svc.cluster.local:50051`): the peer address that `repair`
+  hands to a lagging replica, as the compose service names do in Docker.
+- Readiness and liveness probes run the same check as the Docker `HEALTHCHECK`
+  (`wait_until_ready`). Readiness only matters for the Services; liveness restarts a server
+  that stops answering.
+- SIGTERM: Kubernetes has no `init: true`. The server will install a handler that stops the
+  gRPC server with a short grace period, so a pod stops at once instead of after 30 s. Every
+  acknowledged write is already in the fsynced log, so this is about speed, not safety.
+- From the host: one NodePort Service per pod, selected by
+  `statefulset.kubernetes.io/pod-name`, and kind `extraPortMappings` on 127.0.0.1 only
+  (30051-30054), so `vsearch cluster attach --managed-by kubernetes` works as it does with
+  Docker: client address on the host, peer address inside the cluster. `kubectl
+  port-forward` was the alternative; it needs one long-running process per pod.
+- The repair loop is a Deployment (1 replica) running `vsearch ops watch` with the runbook,
+  attached to the servers by their in-cluster names (client and peer address the same). It
+  needs no access to the Kubernetes API: restarting belongs to Kubernetes, and the runbook
+  only checks, repairs, and probes. So no CRD and no RBAC; it is "operator-style" in that it
+  reconciles the cluster towards healthy, not a Kubernetes operator. Its state lives in an
+  `emptyDir` and is recreated by `attach` each time it starts.
+- Messages that tell the user what to do on an attached cluster name `docker compose`; they
+  will say what to do for whatever `--managed-by` names.
+- The image is built locally and loaded with `kind load docker-image`;
+  `imagePullPolicy: Never`, for the same reason as `pull_policy: never` in compose.
+- Plain YAML in `k8s/` (a kind config and the manifests), applied with `kubectl apply -k`.
+  Helm would add templating for two near-identical StatefulSets; not worth a new tool.
+- `scripts/k8s_smoke.sh`, run in CI with a kind cluster: apply, wait, attach, ingest, search;
+  delete a pod and check that Kubernetes brings it back with its data; delete a replica's
+  volume and pod and check that the watch loop rebuilds it from its twin without being
+  asked, and that search still finds everything. Then delete the kind cluster.
